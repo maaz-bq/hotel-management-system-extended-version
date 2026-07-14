@@ -37,7 +37,37 @@ class HotelBooking(models.Model):
             booking.order_id = quotation.id
             booking.booking_line_ids._ensure_sale_order_lines()
 
+    def _cleanup_orphan_sale_order_lines(self):
+        """Drop quotation lines that no longer have a matching folio line."""
+        for booking in self.filtered("order_id"):
+            linked_so_line_ids = set(
+                booking.booking_line_ids.mapped("sale_order_line_id").ids
+            )
+            orphan_lines = booking.order_id.order_line.filtered(
+                lambda sol: sol.id not in linked_so_line_ids and not sol.display_type
+            )
+            if not orphan_lines:
+                continue
+
+            orders_to_restore = {}
+            for order in orphan_lines.mapped("order_id"):
+                if order.state not in ("draft", "sent", "cancel"):
+                    orders_to_restore[order.id] = order.state
+                    order.with_context(bypass_checkin_checkout=True).write(
+                        {"state": "draft"}
+                    )
+
+            orphan_lines.with_context(bypass_for_exchange_room=True).unlink()
+
+            for order_id, state in orders_to_restore.items():
+                order = self.env["sale.order"].browse(order_id)
+                if order.exists():
+                    order.with_context(bypass_checkin_checkout=True).write(
+                        {"state": state}
+                    )
+
     def action_add_services(self):
+        """Deprecated: folio lines are added inline on the booking form."""
         self.ensure_one()
         products = self.env["product.product"].search(
             self._bookable_service_product_domain()
@@ -83,7 +113,73 @@ class HotelBooking(models.Model):
             ("company_id", "=", self.company_id.id),
         ]
 
+    def _folio_common_product_domain(self):
+        self.ensure_one()
+        return [
+            ("sale_ok", "=", True),
+            ("active", "=", True),
+            "|",
+            ("company_id", "=", False),
+            ("company_id", "=", self.company_id.id),
+        ]
+
+    def _get_folio_available_product_ids(self):
+        """Products selectable inline on the Folio tab."""
+        self.ensure_one()
+        Product = self.env["product.product"]
+        common = self._folio_common_product_domain()
+
+        services = Product.search(
+            common
+            + [
+                ("is_bookable", "=", True),
+                ("product_tmpl_id.is_room_type", "=", False),
+            ]
+        )
+        others = Product.search(
+            common
+            + [
+                ("is_bookable", "=", False),
+                ("product_tmpl_id.is_room_type", "=", False),
+            ]
+        )
+
+        rooms = Product
+        current_rooms = self.booking_line_ids.filtered(
+            lambda line: line.product_id.is_room_type
+        ).mapped("product_id")
+        if self.check_in and self.check_out and self.hotel_id:
+            try:
+                rooms = self.get_available_room_products(
+                    self.check_in, self.check_out, self.hotel_id.id
+                )
+            except ValidationError:
+                rooms = Product
+        rooms = rooms | current_rooms
+
+        return (rooms | services | others).ids
+
+    folio_product_ids = fields.Many2many(
+        comodel_name="product.product",
+        compute="_compute_folio_product_ids",
+        string="Folio Product Selection",
+    )
+
+    @api.depends(
+        "check_in",
+        "check_out",
+        "hotel_id",
+        "company_id",
+        "booking_line_ids.product_id",
+    )
+    def _compute_folio_product_ids(self):
+        for booking in self:
+            booking.folio_product_ids = [
+                (6, 0, booking._get_folio_available_product_ids())
+            ]
+
     def action_add_other_products(self):
+        """Deprecated: folio lines are added inline on the booking form."""
         self.ensure_one()
         products = self.env["product.product"].search(self._other_product_domain())
         return {
@@ -278,7 +374,9 @@ class HotelBooking(models.Model):
             partner = booking.partner_id
             for line in booking.booking_line_ids.filtered(
                 lambda booking_line: (
-                    not booking_line.guest_info_ids
+                    booking_line.product_id
+                    and booking_line.product_id.is_room_type
+                    and not booking_line.guest_info_ids
                     and not (
                         booking_line.adult_count
                         or booking_line.child_count
