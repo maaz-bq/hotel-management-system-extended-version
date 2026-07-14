@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_sale_order_form_payment_totals_extend" model="ir.ui.view">
+        <field name="name">sale.order.form.payment.totals.extend</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='sale_total']//field[@name='tax_totals']" position="after">
+                <div class="float-end w-100">
+                    <table class="float-end">
+                        <tbody>
+                            <tr>
+                                <td class="o_td_label">
+                                    <label class="o_form_label o_tax_total_label" for="paid_amount">Paid Amount</label>
+                                </td>
+                                <td class="o_list_monetary">
+                                    <field name="paid_amount" nolabel="1" readonly="1"
+                                           widget="monetary"
+                                           options="{'currency_field': 'currency_id'}"/>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="o_td_label">
+                                    <label class="o_form_label o_tax_total_label" for="balance_amount">Balance Amount</label>
+                                </td>
+                                <td class="o_list_monetary">
+                                    <field name="balance_amount" nolabel="1" readonly="1"
+                                           widget="monetary"
+                                           options="{'currency_field': 'currency_id'}"/>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_sale_order_form_product_domain_extend" model="ir.ui.view">
+        <field name="name">sale.order.form.product.domain.extend</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="hotel_management_system.view_sale_order_form_inherit"/>
+        <field name="arch" type="xml">
+            <field name="hotel_id" position="after">
+                <field name="is_room_type" invisible="1"/>
+            </field>
+            <xpath expr="//page[@name='order_lines']//field[@name='product_id']" position="attributes">
+                <attribute name="domain">[
+                    ('sale_ok', '=', True),
+                    '|', ('company_id', '=', False), ('company_id', '=', parent.company_id),
+                    '|',
+                        '&amp;', ('parent.hotel_id', '=', False), ('product_tmpl_id.is_room_type', '=', False),
+                        '&amp;', ('parent.hotel_id', '!=', False), '|',
+                            ('product_tmpl_id.is_room_type', '=', False),
+                            '&amp;', ('product_tmpl_id.is_room_type', '=', True), ('product_tmpl_id.hotel_id', '=', parent.hotel_id)
+                ]</attribute>
+                <attribute name="options">{'no_create': True}</attribute>
+            </xpath>
+        </field>
+    </record>
+</odoo>

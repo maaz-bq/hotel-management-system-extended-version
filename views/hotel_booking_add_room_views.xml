@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="hotel_booking_form_hide_booking_lines" model="ir.ui.view">
+        <field name="name">hotel.booking.form.hide.booking.lines</field>
+        <field name="model">hotel.booking</field>
+        <field name="inherit_id" ref="hotel_management_system.hotel_booking_view_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//page[field[@name='booking_line_ids']]" position="replace">
+                <page string="Folio">
+                    <group class="d-flex gap-2 mb-2">
+                        <button name="action_add_rooms" type="object" string="Add Rooms"
+                            class="btn btn-success btn-sm" invisible="status_bar != 'initial'" />
+                        <button name="action_add_services" type="object" string="Add Services"
+                            class="btn btn-primary btn-sm" invisible="status_bar != 'initial'" />
+                        <button name="action_add_other_products" type="object" string="Add Other Products"
+                            class="btn btn-secondary btn-sm" invisible="status_bar != 'initial'" />
+                    </group>
+                    <field name="booking_line_ids" readonly="status_bar != 'initial'"
+                        widget="sol_o2m"
+                        nolabel="1" mode="list" required="True">
+                        <list create="0">
+                            <field name='product_id' string="Product Variant" readonly='True'
+                                widget="sol_product_many2one" />
+                            <field name='booking_days' string='Qty'
+                                readonly="product_id.is_room_type or product_id.is_bookable" />
+                            <field name='adult_count' string='Adults'
+                                modifiers="{'invisible': [['product_id.is_room_type', '=', False]]}" />
+                            <field name='child_count' string='Children'
+                                modifiers="{'invisible': [['product_id.is_room_type', '=', False]]}" />
+                            <field name='price' string='Unit Price' widget='monetary'
+                                options="{'currency_field':'currency_id'}" />
+                            <field name='line_tax_amount' string='Tax' widget='monetary'
+                                options="{'currency_field':'currency_id'}" />
+                            <field name='subtotal_price' string='Amount' widget='monetary'
+                                options="{'currency_field':'currency_id'}" />
+                            <field name='taxed_price' string='Total' widget='monetary'
+                                options="{'currency_field':'currency_id'}" />
+                        </list>
+                    </field>
+                    <group class="oe_subtotal_footer oe_right mt-3">
+                        <field name="amount_untaxed" string="Untaxed Amount" widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="vat_amount" string="VAT (10%)" widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="paid_amount" string="Paid Amount" widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="balance_amount" string="Balance Amount" widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_custom_hotel_booking_line_member_count" model="ir.ui.view">
+        <field name="name">hotel.booking.line.form.hide.members.details</field>
+        <field name="model">hotel.booking.line</field>
+        <field name="inherit_id" ref="hotel_management_system.custom_hotel_booking_line_view_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='room_info']" position="after">
+                <field name="warning" colspan="2" nolabel="1" readonly="1" invisible="warning == ''"
+                    style="color:red;" />
+            </xpath>
+            <xpath expr="//group[@name='room_info']//field[@name='product_id']" position="after">
+                <field name="adult_count"
+                    modifiers="{'invisible': [['product_id.is_room_type', '=', False]]}" />
+                <field name="child_count"
+                    modifiers="{'invisible': [['product_id.is_room_type', '=', False]]}" />
+            </xpath>
+            <xpath expr="//button[@special='save']" position="attributes">
+                <attribute name="invisible">False</attribute>
+            </xpath>
+            <xpath expr="//page[@name='Members Details']" position="replace">
+                <page name="Members Details" invisible="1" />
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_custom_sale_order_line_member_count" model="ir.ui.view">
+        <field name="name">sale.order.line.form.hide.members.details</field>
+        <field name="model">sale.order.line</field>
+        <field name="inherit_id" ref="hotel_management_system.custom_sale_order_line_view_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='room_info']" position="after">
+                <field name="warning" colspan="2" nolabel="1" readonly="1" invisible="warning == ''"
+                    style="color:red;" />
+            </xpath>
+            <xpath expr="//button[@special='save']" position="attributes">
+                <attribute name="invisible">False</attribute>
+            </xpath>
+            <xpath expr="//page[@name='Members Details']" position="replace">
+                <page name="Members Details" invisible="1" />
+            </xpath>
+        </field>
+    </record>
+
+    <record id="service_booking_line_form_view" model="ir.ui.view">
+        <field name="name">hotel.booking.line.form.service.add</field>
+        <field name="model">hotel.booking.line</field>
+        <field name="type">form</field>
+        <field name="arch" type="xml">
+            <form string="Add Service">
+                <sheet>
+                    <field name="booking_id" invisible="1" />
+                    <group string="Service Information">
+                        <group>
+                            <field name="product_id" string="Service" required="1"
+                                domain="[('id', 'in', context.get('default_product_ids'))]" />
+                            <field name="booking_days" string="Qty" readonly="1" />
+                        </group>
+                        <group>
+                            <field name="adult_count" string="Adults" />
+                            <field name="child_count" string="Children" />
+                            <field name="driver_count" string="Drivers" />
+                        </group>
+                    </group>
+                    <group>
+                        <field name="price" string="Unit Price" widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="line_tax_amount" string="Tax Amount" readonly="1"
+                            widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="subtotal_price" string="Subtotal" readonly="1"
+                            widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="taxed_price" string="Total Amount" readonly="1"
+                            widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                        <field name="amount_per_guest" string="Amount per Guest" readonly="1"
+                            widget="monetary"
+                            options="{'currency_field': 'currency_id'}" />
+                    </group>
+                    <field name="description" nolabel="1" widget="html" />
+                </sheet>
+                <footer>
+                    <button string="Save" special="save" class="oe_highlight" data-hotkey="q" />
+                    <button string="Cancel" class="btn btn-default" special="cancel" data-hotkey="x" />
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="other_product_booking_line_form_view" model="ir.ui.view">
+        <field name="name">hotel.booking.line.form.other.product.add</field>
+        <field name="model">hotel.booking.line</field>
+        <field name="type">form</field>
+        <field name="arch" type="xml">
+            <form string="Add Other Product">
+                <sheet>
+                    <field name="booking_id" invisible="1" />
+                    <group string="Product Information">
+                        <group>
+                            <field name="product_id" string="Product Variant" required="1"
+                                domain="[('id', 'in', context.get('default_product_ids'))]" />
+                            <field name="booking_days" string="Qty" />
+                        </group>
+                        <group>
+                            <field name="price" string="Unit Price" widget="monetary"
+                                options="{'currency_field': 'currency_id'}" />
+                            <field name="line_tax_amount" string="Tax Amount" readonly="1"
+                                widget="monetary"
+                                options="{'currency_field': 'currency_id'}" />
+                            <field name="subtotal_price" string="Subtotal" readonly="1"
+                                widget="monetary"
+                                options="{'currency_field': 'currency_id'}" />
+                            <field name="taxed_price" string="Total Amount" readonly="1"
+                                widget="monetary"
+                                options="{'currency_field': 'currency_id'}" />
+                        </group>
+                    </group>
+                    <field name="description" nolabel="1" widget="html" />
+                </sheet>
+                <footer>
+                    <button string="Save" special="save" class="oe_highlight" data-hotkey="q" />
+                    <button string="Cancel" class="btn btn-default" special="cancel" data-hotkey="x" />
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

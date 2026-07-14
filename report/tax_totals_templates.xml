@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="document_tax_totals_hotel_payment_extend"
+              inherit_id="sale.document_tax_totals">
+        <xpath expr="//tr[hasclass('o_subtotal')]/td[1]/span[@t-out=&quot;subtotal['name']&quot;]" position="replace">
+            <span>Total Amount</span>
+        </xpath>
+        <xpath expr="//tr[hasclass('o_subtotal')]/td[2]/span[@t-out=&quot;subtotal['base_amount_currency']&quot;]" position="replace">
+            <span t-att-class="oe_subtotal_footer_separator"
+                  t-out="tax_totals['total_amount_currency']"
+                  t-options='{"widget": "monetary", "display_currency": currency}'/>
+        </xpath>
+        <xpath expr="//tr[hasclass('o_total')]" position="replace">
+            <tr class="o_subtotal">
+                <td><span>Paid Amount</span></td>
+                <td class="text-end">
+                    <span t-out="tax_totals.get('paid_amount_currency', 0.0)"
+                          t-options='{"widget": "monetary", "display_currency": currency}'/>
+                </td>
+            </tr>
+            <tr class="o_subtotal">
+                <td><span>Balance Amount</span></td>
+                <td class="text-end">
+                    <span t-out="tax_totals.get('balance_amount_currency', 0.0)"
+                          t-options='{"widget": "monetary", "display_currency": currency}'/>
+                </td>
+            </tr>
+        </xpath>
+    </template>
+</odoo>

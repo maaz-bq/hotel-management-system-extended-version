@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="report_saleorder_document_hotel_check_in_out"
+              inherit_id="sale.report_saleorder_document">
+        <xpath expr="//div[@id='informations']" position="inside">
+            <div t-if="doc.hotel_check_in" class="col" name="informations_hotel_check_in">
+                <strong>Check In</strong>
+                <div t-field="doc.hotel_check_in" t-options='{"widget": "datetime"}'/>
+            </div>
+            <div t-if="doc.hotel_check_out" class="col" name="informations_hotel_check_out">
+                <strong>Check Out</strong>
+                <div t-field="doc.hotel_check_out" t-options='{"widget": "datetime"}'/>
+            </div>
+        </xpath>
+    </template>
+</odoo>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="product_template_form_view_is_bookable" model="ir.ui.view">
+        <field name="name">product.template.form.is.bookable</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="hotel_management_system.inherit_product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='is_room_type']/.." position="after">
+                <span class="d-inline-block">
+                    <field name="is_bookable"/>
+                    <label for="is_bookable"/>
+                </span>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_template_search_inherit_is_bookable" model="ir.ui.view">
+        <field name="name">product.template.search.is.bookable</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="hotel_management_system.view_product_template_search_inherit_hotel"/>
+        <field name="arch" type="xml">
+            <xpath expr="//filter[@name='group_by_hotel']" position="after">
+                <separator/>
+                <filter string="Bookable" name="is_bookable" domain="[('is_bookable', '=', True)]"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
