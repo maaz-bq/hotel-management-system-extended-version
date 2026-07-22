@@ -18,6 +18,7 @@
                                 required="1" />
                             <field name="product_is_room_type" column_invisible="True" />
                             <field name="product_is_bookable" column_invisible="True" />
+                            <field name="product_is_day_long_tour" column_invisible="True" />
                             <field name="is_other_product_line" column_invisible="True" />
                             <field name="booking_days" string="Qty" force_save="1"
                                 readonly="not product_id or product_is_room_type or product_is_bookable" />
@@ -29,6 +30,9 @@
                                 invisible="not product_id or not product_id.is_bookable or product_id.is_room_type" />
                             <field name="infant_count" string="Infants"
                                 invisible="not product_id or not product_id.is_room_type" />
+                            <field name="day_tour_remaining_occupancy" string="Tour Capacity Left"
+                                readonly="1"
+                                invisible="not product_is_day_long_tour" />
                             <field name="price" string="Unit Price" widget="monetary"
                                 options="{'currency_field':'currency_id'}" />
                             <field name="line_tax_amount" string="Tax" widget="monetary"

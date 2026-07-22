@@ -298,7 +298,14 @@ class HotelBooking(models.Model):
             self.env["product.template"]
             .sudo()
             .search(self._bookable_template_domain(allowed_company_ids))
-            .read(["name", "product_variant_count"])
+            .read(
+                [
+                    "name",
+                    "product_variant_count",
+                    "is_day_long_tour",
+                    "day_tour_max_occupancy",
+                ]
+            )
         )
 
         current_date_check_in = self.search(
@@ -361,12 +368,61 @@ class HotelBooking(models.Model):
         available_rooms = bookable_products - booked_rooms
         return booked_rooms, available_rooms
 
+    def get_count_of_booking(self, selected_date_data, today_date, room):
+        """Add room counts or day-tour occupancy for the Front Desk Dashboard."""
+        result = super().get_count_of_booking(
+            selected_date_data, today_date, room
+        )
+        if not room:
+            return result
+
+        template = self.env["product.template"].browse(room)
+        if template.is_day_long_tour:
+            if selected_date_data < today_date:
+                max_occupancy = template.day_tour_max_occupancy or 0
+                result.update(
+                    {
+                        "is_day_long_tour": True,
+                        "day_tour_max_occupancy": max_occupancy,
+                        "day_tour_booked_guests": 0,
+                        "day_tour_remaining_occupancy": 0,
+                        "total_room_count": max_occupancy,
+                        "booked_room_count": 0,
+                        "available_rooms": 0,
+                    }
+                )
+            else:
+                result.update(template.get_day_tour_dashboard_occupancy(selected_date_data))
+                result["available_rooms"] = result["day_tour_remaining_occupancy"]
+            return result
+
+        domain = [("is_bookable", "=", True), ("active", "=", True)]
+        if room:
+            domain.append(("product_tmpl_id", "=", room))
+        total_count = self.env["product.product"].search_count(domain)
+        available_count = result.get("available_rooms", 0)
+        result.update(
+            {
+                "total_room_count": total_count,
+                "booked_room_count": max(total_count - available_count, 0),
+            }
+        )
+        return result
+
     @api.depends("check_out", "check_in", "expected_check_out")
     def _compute_booking_days(self):
         super()._compute_booking_days()
         for booking in self:
             if booking.check_in and booking.check_out and not booking.booking_days:
                 booking.booking_days = 1
+
+    @api.constrains("check_in", "hotel_id")
+    def _check_day_tour_occupancy_on_booking(self):
+        day_tour_lines = self.mapped("booking_line_ids").filtered(
+            lambda line: line.product_id.product_tmpl_id.is_day_long_tour
+        )
+        if day_tour_lines:
+            day_tour_lines._validate_day_tour_occupancy()
 
     def _ensure_booking_line_guests(self):
         GuestInfo = self.env["guest.info"]
@@ -528,4 +584,3 @@ class HotelBooking(models.Model):
                         "hotel_check_out": booking.check_out,
                     }
                 )
-

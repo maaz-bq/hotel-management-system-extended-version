@@ -392,3 +392,5 @@ These exist in the base module and are documented for future work:
 ---
 
 *Last updated: July 2026 — includes inline folio, qty editing, folio→SO delete sync, and confirm/invoice fixes.*
++
+   

@@ -3,6 +3,11 @@
 from odoo import api, fields, models, _
 from odoo.exceptions import ValidationError
 
+from .day_tour_utils import (
+    day_tour_date_from_booking,
+    day_tour_line_guest_count,
+    is_day_long_tour_product,
+)
 from .guest_member_utils import (
     extra_guest_charge,
     guest_counts_from_line,
@@ -64,6 +69,154 @@ class HotelBookingLine(models.Model):
         string="Is Other Product Line",
         compute="_compute_line_product_flags",
     )
+    product_is_day_long_tour = fields.Boolean(
+        related="product_id.is_day_long_tour",
+    )
+    day_tour_remaining_occupancy = fields.Integer(
+        string="Remaining Tour Capacity",
+        compute="_compute_day_tour_remaining_occupancy",
+    )
+
+    @api.depends(
+        "product_id",
+        "product_id.is_day_long_tour",
+        "booking_id.check_in",
+        "booking_id.hotel_id",
+        "adult_count",
+        "child_count",
+        "infant_count",
+        "driver_count",
+    )
+    def _compute_day_tour_remaining_occupancy(self):
+        for line in self:
+            line.day_tour_remaining_occupancy = 0
+            if not is_day_long_tour_product(line.product_id):
+                continue
+            booking = line.booking_id
+            tour_date = day_tour_date_from_booking(booking)
+            if not tour_date or not booking.hotel_id:
+                continue
+            template = line.product_id.product_tmpl_id
+            line.day_tour_remaining_occupancy = template.get_day_tour_remaining_occupancy(
+                tour_date,
+                booking.hotel_id.id,
+                exclude_booking_id=booking.id,
+            )
+
+    def _validate_day_tour_occupancy(self):
+        bookings = self.mapped("booking_id")
+        for booking in bookings:
+            tour_lines = booking.booking_line_ids.filtered(
+                lambda booking_line: is_day_long_tour_product(booking_line.product_id)
+            )
+            if not tour_lines:
+                continue
+
+            if not booking.hotel_id:
+                raise ValidationError(
+                    _("Please set a hotel on the booking before adding day-long tours.")
+                )
+            tour_date = day_tour_date_from_booking(booking)
+            if not tour_date:
+                raise ValidationError(
+                    _("Please set a check-in date before adding day-long tours.")
+                )
+
+            totals_by_template = {}
+            for line in tour_lines:
+                template = line.product_id.product_tmpl_id
+                totals_by_template[template] = (
+                    totals_by_template.get(template, 0)
+                    + day_tour_line_guest_count(line)
+                )
+
+            for template, total_guests in totals_by_template.items():
+                if total_guests <= 0:
+                    raise ValidationError(
+                        _("Day-long tour '%(tour)s' requires at least one guest.")
+                        % {"tour": template.display_name}
+                    )
+                if total_guests > template.day_tour_max_occupancy:
+                    raise ValidationError(
+                        _(
+                            "Day-long tour '%(tour)s' allows at most %(max)s guests per booking."
+                        )
+                        % {
+                            "tour": template.display_name,
+                            "max": template.day_tour_max_occupancy,
+                        }
+                    )
+                remaining = template.get_day_tour_remaining_occupancy(
+                    tour_date,
+                    booking.hotel_id.id,
+                    exclude_booking_id=booking.id,
+                )
+                if total_guests > remaining:
+                    raise ValidationError(
+                        _(
+                            "Not enough day-long tour capacity for '%(tour)s' on %(date)s. "
+                            "Requested: %(requested)s, remaining: %(remaining)s."
+                        )
+                        % {
+                            "tour": template.display_name,
+                            "date": tour_date,
+                            "requested": total_guests,
+                            "remaining": remaining,
+                        }
+                    )
+
+    def _day_tour_occupancy_warning(self):
+        self.ensure_one()
+        if not is_day_long_tour_product(self.product_id):
+            return False
+        booking = self.booking_id
+        template = self.product_id.product_tmpl_id
+        tour_date = day_tour_date_from_booking(booking)
+        if not booking.hotel_id or not tour_date:
+            return {
+                "title": _("Day-long tour"),
+                "message": _(
+                    "Set the booking hotel and check-in date to validate tour capacity."
+                ),
+            }
+        guest_count = day_tour_line_guest_count(self)
+        if guest_count <= 0:
+            return {
+                "title": _("Day-long tour"),
+                "message": _("Please enter at least one guest for this day-long tour."),
+            }
+        total_on_booking = sum(
+            day_tour_line_guest_count(line)
+            for line in booking.booking_line_ids.filtered(
+                lambda booking_line: (
+                    booking_line.product_id.product_tmpl_id == template
+                )
+            )
+        )
+        if total_on_booking > template.day_tour_max_occupancy:
+            return {
+                "title": _("Day-long tour capacity exceeded"),
+                "message": _(
+                    "This tour allows at most %(max)s guests per booking.",
+                    max=template.day_tour_max_occupancy,
+                ),
+            }
+        remaining = template.get_day_tour_remaining_occupancy(
+            tour_date,
+            booking.hotel_id.id,
+            exclude_booking_id=booking.id,
+        )
+        if total_on_booking > remaining:
+            return {
+                "title": _("Day-long tour capacity exceeded"),
+                "message": _(
+                    "Only %(remaining)s guest places remain for '%(tour)s' on %(date)s.",
+                    remaining=remaining,
+                    tour=template.display_name,
+                    date=tour_date,
+                ),
+            }
+        return False
 
     @api.depends("product_id", "product_id.is_room_type", "product_id.is_bookable")
     def _compute_line_product_flags(self):
@@ -315,6 +468,9 @@ class HotelBookingLine(models.Model):
                     + (line.infant_count or 0)
                 )
                 line.booking_days = max(guest_total, 1)
+                warning = line._day_tour_occupancy_warning()
+                if warning:
+                    return {"warning": warning}
             elif _is_other_product(product):
                 line.adult_count = 0
                 line.child_count = 0
@@ -326,6 +482,17 @@ class HotelBookingLine(models.Model):
                     line.price = booking.pricelist_id._get_product_price(
                         product, line.booking_days
                     )
+
+    @api.constrains(
+        "product_id",
+        "booking_id",
+        "adult_count",
+        "child_count",
+        "infant_count",
+        "driver_count",
+    )
+    def _check_day_tour_occupancy(self):
+        self._validate_day_tour_occupancy()
 
     @api.constrains("product_id", "booking_id")
     def _check_folio_product_selection(self):
@@ -356,6 +523,7 @@ class HotelBookingLine(models.Model):
 
     @api.onchange("adult_count", "child_count", "driver_count", "infant_count", "product_id")
     def _onchange_service_guest_qty(self):
+        warning_payload = False
         for line in self:
             if not _is_bookable_service_product(line.product_id):
                 continue
@@ -370,6 +538,11 @@ class HotelBookingLine(models.Model):
                 line.price = line.booking_id.pricelist_id._get_product_price(
                     line.product_id, line.booking_days
                 )
+            warning = line._day_tour_occupancy_warning()
+            if warning:
+                warning_payload = warning
+        if warning_payload:
+            return {"warning": warning_payload}
 
     @api.onchange("booking_days", "product_id")
     def _onchange_other_product_qty(self):

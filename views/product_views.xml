@@ -10,6 +10,31 @@
                     <field name="is_bookable"/>
                     <label for="is_bookable"/>
                 </span>
+                <span class="d-inline-block" invisible="is_room_type">
+                    <field name="is_day_long_tour" invisible="not is_bookable"/>
+                    <label for="is_day_long_tour" invisible="not is_bookable"/>
+                </span>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="product_template_form_view_day_long_tour_config" model="ir.ui.view">
+        <field name="name">product.template.form.day.long.tour.config</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="hotel_management_system.product_template_service_facility_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//page[@name='room configuration']" position="after">
+                <page string="Day-Long Tour" name="day_long_tour_config"
+                    invisible="not is_day_long_tour">
+                    <group>
+                        <field name="day_tour_max_occupancy"/>
+                    </group>
+                    <div class="text-muted">
+                        Total guests on folio lines reduce this tour's daily capacity
+                        for the booking check-in date at the selected hotel.
+                        Deleting a tour line or cancelling a booking restores capacity.
+                    </div>
+                </page>
             </xpath>
         </field>
     </record>
@@ -22,6 +47,8 @@
             <xpath expr="//filter[@name='group_by_hotel']" position="after">
                 <separator/>
                 <filter string="Bookable" name="is_bookable" domain="[('is_bookable', '=', True)]"/>
+                <filter string="Day-Long Tour" name="is_day_long_tour"
+                    domain="[('is_day_long_tour', '=', True)]"/>
             </xpath>
         </field>
     </record>
