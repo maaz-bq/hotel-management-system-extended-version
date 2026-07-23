@@ -7,6 +7,13 @@ from odoo import api, fields, models, _
 from odoo.exceptions import ValidationError
 
 from .checkin_utils import truncate_minutes_seconds
+from .day_tour_utils import (
+    day_tour_check_in_bounds,
+    day_tour_date_from_line,
+    day_tour_date_in_stay,
+    day_tour_stay_date_range,
+    is_day_long_tour_product,
+)
 
 
 class HotelBooking(models.Model):
@@ -416,13 +423,106 @@ class HotelBooking(models.Model):
             if booking.check_in and booking.check_out and not booking.booking_days:
                 booking.booking_days = 1
 
-    @api.constrains("check_in", "hotel_id")
+    @api.constrains("check_in", "check_out", "hotel_id")
     def _check_day_tour_occupancy_on_booking(self):
         day_tour_lines = self.mapped("booking_line_ids").filtered(
             lambda line: line.product_id.product_tmpl_id.is_day_long_tour
         )
         if day_tour_lines:
             day_tour_lines._validate_day_tour_occupancy()
+
+    def _sync_day_tour_line_dates(self):
+        for booking in self:
+            start, _last = day_tour_stay_date_range(booking)
+            if not start:
+                continue
+            for line in booking.booking_line_ids.filtered(
+                lambda booking_line: is_day_long_tour_product(booking_line.product_id)
+            ):
+                if not line.tour_date or not day_tour_date_in_stay(booking, line.tour_date):
+                    line.tour_date = start
+
+    def write(self, vals):
+        res = super().write(vals)
+        if any(field in vals for field in ("check_in", "check_out")):
+            self._sync_day_tour_line_dates()
+        return res
+
+    def _prepare_dashboard_calendar_line_event(self, line):
+        """Build one dashboard calendar entry for a room or day-long tour folio line."""
+        self.ensure_one()
+        product = line.product_id
+        if not product:
+            return None
+
+        partner = self.partner_id
+        partner_value = [partner.id, partner.display_name] if partner else [False, ""]
+        booking_name = self.display_name or self.name or ""
+
+        if is_day_long_tour_product(product):
+            tour_date = day_tour_date_from_line(line)
+            if not tour_date:
+                return None
+            check_in, check_out = day_tour_check_in_bounds(tour_date)
+            line_label = product.display_name
+            is_day_tour = True
+        elif product.is_room_type:
+            if not self.check_in or not self.check_out:
+                return None
+            check_in = self.check_in
+            check_out = self.check_out
+            line_label = product.display_name
+            is_day_tour = False
+        else:
+            return None
+
+        event = {
+            "id": -line.id,
+            "dashboard_booking_id": self.id,
+            "dashboard_line_id": line.id,
+            "dashboard_is_day_long_tour": is_day_tour,
+            "display_name": booking_name,
+            "name": booking_name,
+            "check_in": fields.Datetime.to_string(check_in),
+            "check_out": fields.Datetime.to_string(check_out),
+            "partner_id": partner_value,
+            "status_bar": self.status_bar,
+            "total_amount": self.total_amount,
+            "line_product_name": line_label,
+        }
+        if is_day_tour:
+            event["tour_date"] = fields.Date.to_string(tour_date)
+        return event
+
+    @api.model
+    def fetch_dashboard_calendar_line_events(self, booking_ids, product_tmpl_id=None):
+        """Return one calendar event per folio line for the Front Desk Dashboard."""
+        bookings = self.browse(booking_ids).exists()
+        events = []
+        for booking in bookings:
+            lines = booking.booking_line_ids.filtered(
+                lambda booking_line: (
+                    booking_line.product_id and not booking_line.display_type
+                )
+            )
+            if product_tmpl_id:
+                lines = lines.filtered(
+                    lambda booking_line: (
+                        booking_line.product_id.product_tmpl_id.id == product_tmpl_id
+                    )
+                )
+            else:
+                lines = lines.filtered(
+                    lambda booking_line: (
+                        booking_line.product_id.is_room_type
+                        or is_day_long_tour_product(booking_line.product_id)
+                    )
+                )
+            for line in lines:
+                event = booking._prepare_dashboard_calendar_line_event(line)
+                if event:
+                    events.append(event)
+        return events
 
     def _ensure_booking_line_guests(self):
         GuestInfo = self.env["guest.info"]

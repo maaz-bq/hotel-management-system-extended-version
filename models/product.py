@@ -7,7 +7,6 @@ from odoo.exceptions import ValidationError
 
 from .day_tour_utils import (
     DAY_TOUR_ACTIVE_BOOKING_STATUSES,
-    day_tour_check_in_bounds,
     day_tour_line_guest_count,
 )
 
@@ -23,7 +22,7 @@ class ProductTemplate(models.Model):
     is_day_long_tour = fields.Boolean(
         string="Is Day-Long Tour",
         help="When enabled, each guest on a folio line reduces this tour's "
-        "daily occupancy pool for the booking check-in date.",
+        "daily occupancy pool for the line's tour date.",
     )
     day_tour_max_occupancy = fields.Integer(
         string="Tour Max Occupancy",
@@ -68,13 +67,11 @@ class ProductTemplate(models.Model):
 
     def _get_day_tour_booking_line_domain(self, tour_date, hotel_id):
         self.ensure_one()
-        start_dt, end_dt = day_tour_check_in_bounds(tour_date)
         return [
             ("product_id.product_tmpl_id", "=", self.id),
+            ("tour_date", "=", tour_date),
             ("booking_id.status_bar", "in", list(DAY_TOUR_ACTIVE_BOOKING_STATUSES)),
             ("booking_id.hotel_id", "=", hotel_id),
-            ("booking_id.check_in", ">=", start_dt),
-            ("booking_id.check_in", "<=", end_dt),
         ]
 
     def get_day_tour_booked_guests(
@@ -123,13 +120,11 @@ class ProductTemplate(models.Model):
             return 0
         if hotel_id:
             return self.get_day_tour_booked_guests(tour_date, hotel_id)
-        start_dt, end_dt = day_tour_check_in_bounds(tour_date)
         lines = self.env["hotel.booking.line"].search(
             [
                 ("product_id.product_tmpl_id", "=", self.id),
+                ("tour_date", "=", tour_date),
                 ("booking_id.status_bar", "in", list(DAY_TOUR_ACTIVE_BOOKING_STATUSES)),
-                ("booking_id.check_in", ">=", start_dt),
-                ("booking_id.check_in", "<=", end_dt),
             ]
         )
         return sum(day_tour_line_guest_count(line) for line in lines)
@@ -152,6 +147,21 @@ class ProductTemplate(models.Model):
             "available_room_count": remaining,
             "booked_room_count": booked_guests,
         }
+
+    def _get_day_tour_dashboard_booking_lines(self):
+        """Folio lines for this tour that consume dashboard calendar capacity."""
+        self.ensure_one()
+        return self.env["hotel.booking.line"].search(
+            [
+                ("product_id.product_tmpl_id", "=", self.id),
+                ("tour_date", "!=", False),
+                ("booking_id.status_bar", "in", list(DAY_TOUR_ACTIVE_BOOKING_STATUSES)),
+            ]
+        )
+
+    def _get_day_tour_dashboard_booking_ids(self):
+        self.ensure_one()
+        return self._get_day_tour_dashboard_booking_lines().mapped("booking_id").ids
 
     def _fetch_day_tour_data_for_dashboard(self, **kwargs):
         selected_date = (
@@ -178,12 +188,10 @@ class ProductTemplate(models.Model):
             occupancy = self.get_day_tour_dashboard_occupancy(tour_date)
         tour_record.update(occupancy)
         tour_record["room_variant_data"] = []
-        b_ids = self.env["hotel.booking"].search(
-            [("booking_line_ids.product_tmpl_id", "=", self.id)]
-        ).ids
         return {
             "room_record": [tour_record],
-            "b_ids": b_ids,
+            "b_ids": self._get_day_tour_dashboard_booking_ids(),
+            "is_day_long_tour": True,
         }
 
     def fetch_data_for_room(self, **kwargs):

@@ -1,12 +1,141 @@
 /** @odoo-module **/
 
 import { patch } from "@web/core/utils/patch";
+import { deserializeDate } from "@web/core/l10n/dates";
 import { CalendarController } from "@web/views/calendar/calendar_controller";
+import { CalendarModel } from "@web/views/calendar/calendar_model";
+import { CalendarCommonRenderer } from "@web/views/calendar/calendar_common/calendar_common_renderer";
+import { CalendarCommonPopover } from "@web/views/calendar/calendar_common/calendar_common_popover";
+
+function isHotelDashboardCalendar(model) {
+	return model.resModel === "hotel.booking" && Boolean(model.meta?.productData);
+}
+
+function isDashboardFolioLineEvent(model, recordOrId) {
+	if (!isHotelDashboardCalendar(model)) {
+		return false;
+	}
+	if (typeof recordOrId === "number") {
+		return recordOrId < 0;
+	}
+	return Boolean(recordOrId?.rawRecord?.dashboard_booking_id);
+}
+
+function getDashboardFolioLineId(recordOrId) {
+	if (typeof recordOrId === "number") {
+		return recordOrId < 0 ? -recordOrId : null;
+	}
+	if (recordOrId?.rawRecord?.dashboard_line_id) {
+		return recordOrId.rawRecord.dashboard_line_id;
+	}
+	if (recordOrId?.id < 0) {
+		return -recordOrId.id;
+	}
+	return null;
+}
 
 /**
- * Front Desk Dashboard: is_bookable product lists, room counts, day-tour occupancy.
+ * Front Desk Dashboard: folio-line calendar events, bookable product panel.
  */
+patch(CalendarModel.prototype, {
+	get canEdit() {
+		if (isHotelDashboardCalendar(this)) {
+			return false;
+		}
+		return (
+			this.meta.canEdit &&
+			!this.meta.fields[this.meta.fieldMapping.date_start].readonly
+		);
+	},
+
+	async unlinkRecord(recordId) {
+		if (isDashboardFolioLineEvent(this, recordId)) {
+			const lineId = getDashboardFolioLineId(recordId);
+			if (lineId) {
+				await this.orm.unlink("hotel.booking.line", [lineId]);
+				await this.load();
+			}
+			return;
+		}
+		return super.unlinkRecord(...arguments);
+	},
+
+	async updateRecord(record, options = {}) {
+		if (isDashboardFolioLineEvent(this, record)) {
+			return;
+		}
+		return super.updateRecord(...arguments);
+	},
+
+	async loadRecords(data) {
+		if (this.resModel !== "hotel.booking") {
+			return super.loadRecords(...arguments);
+		}
+		const rawBookings = await this.fetchRecords(data);
+		const bookingIds = rawBookings.map((booking) => booking.id);
+		if (!bookingIds.length) {
+			return {};
+		}
+		const lineEvents = await this.orm.call(
+			"hotel.booking",
+			"fetch_dashboard_calendar_line_events",
+			[bookingIds],
+			{ product_tmpl_id: this.room_id || false },
+		);
+		const records = {};
+		for (const rawRecord of lineEvents) {
+			records[rawRecord.id] = this.normalizeDashboardLineRecord(rawRecord);
+		}
+		return records;
+	},
+
+	normalizeDashboardLineRecord(rawRecord) {
+		const res = super.normalizeRecord(rawRecord);
+		if (rawRecord.dashboard_is_day_long_tour && rawRecord.tour_date) {
+			const tourDay = deserializeDate(rawRecord.tour_date).startOf("day");
+			res.start = tourDay;
+			res.end = tourDay;
+			res.isAllDay = true;
+		}
+		const partnerName = rawRecord.partner_id?.[1] || "";
+		const productName = rawRecord.line_product_name || "";
+		res.title = `${res.title} ${partnerName} (${productName})`.trim();
+		return res;
+	},
+});
+
+patch(CalendarCommonRenderer.prototype, {
+	convertRecordToEvent(record) {
+		const event = super.convertRecordToEvent(...arguments);
+		if (
+			this.props.model.resModel !== "hotel.booking" ||
+			!this.props.model.meta?.productData ||
+			!record.rawRecord?.dashboard_is_day_long_tour ||
+			!record.rawRecord?.tour_date
+		) {
+			return event;
+		}
+		const tourDay = deserializeDate(record.rawRecord.tour_date).startOf("day");
+		return {
+			...event,
+			start: tourDay.toISO(),
+			end: tourDay.plus({ days: 1 }).toISO(),
+			allDay: true,
+		};
+	},
+});
+
 patch(CalendarController.prototype, {
+	async editRecord(record, context = {}, shouldFetchFormViewId = true) {
+		if (
+			this.model.resModel === "hotel.booking" &&
+			record.rawRecord?.dashboard_booking_id
+		) {
+			record = { ...record, id: record.rawRecord.dashboard_booking_id };
+		}
+		return super.editRecord(record, context, shouldFetchFormViewId);
+	},
+
 	openViewonClick(ev) {
 		if (
 			$(ev.target).hasClass("total_available") ||
@@ -81,7 +210,7 @@ patch(CalendarController.prototype, {
                 <tbody>
                     <tr><td>MAX OCCUPANCY</td><td id="totalRoomCount">${maxOccupancy}</td></tr>
                     <tr><td>BOOKED GUESTS</td><td id="bookedRoomCount">${booked}</td></tr>
-                    <tr><td>REMAINING</td><td id="availableRoomCount">${remaining}</td></tr>
+                    <tr><td>REMAINING</td><td id="remainingRoomCount">${remaining}</td></tr>
                 </tbody>
             </table>`;
 	},
@@ -115,7 +244,7 @@ patch(CalendarController.prototype, {
 			$("#bookedRoomCount").text(
 				counts.booked ?? counts.day_tour_booked_guests ?? 0
 			);
-			$("#availableRoomCount").text(
+			$("#remainingRoomCount, #availableRoomCount").text(
 				counts.available ?? counts.day_tour_remaining_occupancy ?? 0
 			);
 			return;
@@ -171,6 +300,7 @@ patch(CalendarController.prototype, {
 
 		if (!room_id) {
 			this.selected_room_is_day_long_tour = false;
+			this.model.room_is_day_long_tour = false;
 			return super.fetchRoomTypeData(...arguments);
 		}
 
@@ -188,8 +318,9 @@ patch(CalendarController.prototype, {
 		);
 		this.model.room_book_ids = d.b_ids;
 		const room_detail = d.room_record;
-		const isDayTour = Boolean(room_detail[0]?.is_day_long_tour);
+		const isDayTour = Boolean(d.is_day_long_tour ?? room_detail[0]?.is_day_long_tour);
 		this.selected_room_is_day_long_tour = isDayTour;
+		this.model.room_is_day_long_tour = isDayTour;
 
 		const counts = {
 			total: room_detail[0].total_room_count ?? room_detail[0].day_tour_max_occupancy ?? 0,
@@ -239,5 +370,18 @@ patch(CalendarController.prototype, {
 				}
 			});
 		await this.model.load();
+	},
+});
+
+patch(CalendarCommonPopover.prototype, {
+	isDashboardFolioLineEvent() {
+		return isDashboardFolioLineEvent(this.props.model, this.props.record);
+	},
+
+	get popoverResId() {
+		if (this.isDashboardFolioLineEvent()) {
+			return this.props.record.rawRecord.dashboard_booking_id;
+		}
+		return this.props.record.id;
 	},
 });

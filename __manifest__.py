@@ -2,7 +2,7 @@
 {
     "name": "Hotel Management System Extend",
     "summary": "Extends hotel sale orders with portal/report fields, payment totals, and payment email fixes.",
-    "version": "18.0.1.0.20",
+    "version": "18.0.1.0.26",
     "category": "Generic Modules/Hotel Reservation",
     "depends": [
         "hotel_management_system",
@@ -21,6 +21,7 @@
     "post_init_hook": "post_init_hook",
     "assets": {
         "web.assets_backend": [
+            "hotel_management_system_extend/static/src/views/calendar/calendar_popover.xml",
             "hotel_management_system_extend/static/src/views/calendar/calendar_controller.js",
         ],
     },

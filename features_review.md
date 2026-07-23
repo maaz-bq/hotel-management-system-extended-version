@@ -61,13 +61,13 @@ Booked guests (tour T, date D, hotel H) =
     SUM(adults + children + infants + drivers)
     on all folio lines for product T where:
       - booking.hotel_id = H
-      - booking.check_in date = D
-      - booking.status_bar NOT IN (cancel, checkout)
+      - line.tour_date = D
+      - booking.status_bar IN (initial, confirm, allot)
 
 Remaining capacity = day_tour_max_occupancy − booked guests
 ```
 
-**Tour date rule:** uses the booking **check-in date** (calendar day), not check-out.
+**Tour date rule:** each day-long tour folio line has a **Tour date** (`tour_date`). Defaults to booking **check-in date**. Valid range: check-in date through the day before check-out (e.g. check-in today + check-out tomorrow → tour can only be **today**). Capacity and dashboard counts use **`tour_date`**, not the full stay window.
 
 **Guest count rule:** `adult_count + child_count + infant_count + driver_count` on the folio line.
 
@@ -97,9 +97,10 @@ Remaining capacity = day_tour_max_occupancy − booked guests
 | -------------------- | ------------------------------------------------------------------------------------------------ |
 | Product picker       | Day-long tours appear like other **bookable services** (`is_bookable`, not `is_room_type`)       |
 | Guest fields         | Adults / children / infants / drivers (same as bookable services)                                |
-| Qty / `booking_days` | Synced from total guest count (existing bookable-service logic)                                  |
-| Folio column         | **Tour Capacity Left** — read-only remaining places after other bookings                         |
-| Save blocked if      | No hotel, no check-in date, zero guests, line guests > max occupancy, or line guests > remaining |
+| Tour date            | Per-line **Tour Date** on folio; defaults to check-in; must fall within stay window                |
+| Qty / `booking_days` | Synced from total guest count (existing bookable-service logic); read-only on folio                |
+| Folio column         | **Tour Date**, **Tour Capacity Left** — remaining places for that tour on the selected date        |
+| Save blocked if      | No hotel, no tour date, tour date outside stay, zero guests, line guests > max, or > remaining     |
 | Quotation            | Tour line only — existing `_ensure_sale_order_lines` sync (no extra SO line for “hold”)          |
 
 ### Front Desk Dashboard (day-long tours)

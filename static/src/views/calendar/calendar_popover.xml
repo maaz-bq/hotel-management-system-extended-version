@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-inherit="web.CalendarCommonPopover.body" t-inherit-mode="extension">
+        <xpath expr="//Record[@resModel='props.model.resModel']" position="attributes">
+            <attribute name="resId">popoverResId</attribute>
+        </xpath>
+    </t>
+</templates>

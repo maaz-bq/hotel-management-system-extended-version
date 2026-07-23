@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from odoo import fields
 
@@ -31,6 +31,32 @@ def day_tour_date_from_booking(booking):
     if not booking or not booking.check_in:
         return False
     return fields.Date.to_date(booking.check_in)
+
+
+def day_tour_stay_date_range(booking):
+    """Return inclusive first/last calendar days valid for tour_date on a booking."""
+    if not booking or not booking.check_in:
+        return False, False
+    start = fields.Date.to_date(booking.check_in)
+    if not booking.check_out:
+        return start, start
+    checkout_date = fields.Date.to_date(booking.check_out)
+    if checkout_date <= start:
+        return start, start
+    return start, checkout_date - timedelta(days=1)
+
+
+def day_tour_date_in_stay(booking, tour_date):
+    start, last = day_tour_stay_date_range(booking)
+    if not start or not tour_date:
+        return False
+    return start <= tour_date <= last
+
+
+def day_tour_date_from_line(line):
+    if line.tour_date:
+        return line.tour_date
+    return day_tour_date_from_booking(line.booking_id)
 
 
 def day_tour_check_in_bounds(tour_date):
