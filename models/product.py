@@ -6,7 +6,9 @@ from odoo import api, fields, models, _
 from odoo.exceptions import ValidationError
 
 from .day_tour_utils import (
+    CONFIRMED_BOOKING_STATUSES,
     DAY_TOUR_ACTIVE_BOOKING_STATUSES,
+    day_tour_line_calendar_date,
     day_tour_line_guest_count,
 )
 
@@ -17,12 +19,12 @@ class ProductTemplate(models.Model):
     is_bookable = fields.Boolean(
         string="Is Bookable",
         help="Products that can be reserved through hotel booking flows "
-        "(rooms, day tours, and other capacity-based services).",
+        "(rooms, day tours, and other bookable services).",
     )
     is_day_long_tour = fields.Boolean(
         string="Is Day-Long Tour",
         help="When enabled, each guest on a folio line reduces this tour's "
-        "daily occupancy pool for the line's tour date.",
+        "daily occupancy pool for the line's check-in date.",
     )
     day_tour_max_occupancy = fields.Integer(
         string="Tour Max Occupancy",
@@ -65,14 +67,25 @@ class ProductTemplate(models.Model):
                     _("Please set Max Occupancy to at least 1 for day-long tours.")
                 )
 
-    def _get_day_tour_booking_line_domain(self, tour_date, hotel_id):
+    def _get_day_tour_booking_lines(self, tour_date, hotel_id, active_only=True):
         self.ensure_one()
-        return [
+        statuses = (
+            DAY_TOUR_ACTIVE_BOOKING_STATUSES
+            if active_only
+            else CONFIRMED_BOOKING_STATUSES
+        )
+        domain = [
             ("product_id.product_tmpl_id", "=", self.id),
-            ("tour_date", "=", tour_date),
-            ("booking_id.status_bar", "in", list(DAY_TOUR_ACTIVE_BOOKING_STATUSES)),
-            ("booking_id.hotel_id", "=", hotel_id),
+            ("check_in", "!=", False),
+            ("booking_id.status_bar", "in", list(statuses)),
         ]
+        if hotel_id:
+            domain.append(("booking_id.hotel_id", "=", hotel_id))
+        lines = self.env["hotel.booking.line"].search(domain)
+        tour_day = fields.Date.to_date(tour_date)
+        return lines.filtered(
+            lambda line: day_tour_line_calendar_date(line) == tour_day
+        )
 
     def get_day_tour_booked_guests(
         self,
@@ -85,9 +98,7 @@ class ProductTemplate(models.Model):
         self.ensure_one()
         if not self.is_day_long_tour or not tour_date or not hotel_id:
             return 0
-        lines = self.env["hotel.booking.line"].search(
-            self._get_day_tour_booking_line_domain(tour_date, hotel_id)
-        )
+        lines = self._get_day_tour_booking_lines(tour_date, hotel_id)
         if exclude_booking_id:
             lines = lines.filtered(
                 lambda line: line.booking_id.id != exclude_booking_id
@@ -114,26 +125,23 @@ class ProductTemplate(models.Model):
         return max(max_occupancy - booked, 0)
 
     def _get_day_tour_booked_guests_for_dashboard(self, tour_date, hotel_id=None):
-        """Booked guests for dashboard — scoped to hotel when product has one."""
+        """Confirmed guest count for this tour on a calendar day."""
         self.ensure_one()
         if not self.is_day_long_tour or not tour_date:
             return 0
-        if hotel_id:
-            return self.get_day_tour_booked_guests(tour_date, hotel_id)
-        lines = self.env["hotel.booking.line"].search(
-            [
-                ("product_id.product_tmpl_id", "=", self.id),
-                ("tour_date", "=", tour_date),
-                ("booking_id.status_bar", "in", list(DAY_TOUR_ACTIVE_BOOKING_STATUSES)),
-            ]
+        lines = self._get_day_tour_booking_lines(
+            tour_date, hotel_id=False, active_only=False
         )
+        if self.hotel_id:
+            lines = lines.filtered(
+                lambda line: line.booking_id.hotel_id == self.hotel_id
+            )
         return sum(day_tour_line_guest_count(line) for line in lines)
 
-    def get_day_tour_dashboard_occupancy(self, tour_date):
-        """Occupancy summary for the Front Desk Dashboard."""
+    def get_day_tour_dashboard_occupancy(self, tour_date, hotel_id=None):
+        """Occupancy summary for the Front Desk Dashboard (confirmed only)."""
         self.ensure_one()
         max_occupancy = self.day_tour_max_occupancy or 0
-        hotel_id = self.hotel_id.id if self.hotel_id else None
         booked_guests = self._get_day_tour_booked_guests_for_dashboard(
             tour_date, hotel_id=hotel_id
         )
@@ -149,13 +157,13 @@ class ProductTemplate(models.Model):
         }
 
     def _get_day_tour_dashboard_booking_lines(self):
-        """Folio lines for this tour that consume dashboard calendar capacity."""
+        """Confirmed folio lines for this tour shown on the dashboard calendar."""
         self.ensure_one()
         return self.env["hotel.booking.line"].search(
             [
                 ("product_id.product_tmpl_id", "=", self.id),
-                ("tour_date", "!=", False),
-                ("booking_id.status_bar", "in", list(DAY_TOUR_ACTIVE_BOOKING_STATUSES)),
+                ("check_in", "!=", False),
+                ("booking_id.status_bar", "in", list(CONFIRMED_BOOKING_STATUSES)),
             ]
         )
 
@@ -176,11 +184,12 @@ class ProductTemplate(models.Model):
             ["name", "is_day_long_tour", "day_tour_max_occupancy", "hotel_id"]
         )[0]
         if tour_date < fields.Date.today():
+            max_occupancy = tour_record["day_tour_max_occupancy"]
             occupancy = {
-                "day_tour_max_occupancy": tour_record["day_tour_max_occupancy"],
+                "day_tour_max_occupancy": max_occupancy,
                 "day_tour_booked_guests": 0,
                 "day_tour_remaining_occupancy": 0,
-                "total_room_count": tour_record["day_tour_max_occupancy"],
+                "total_room_count": max_occupancy,
                 "available_room_count": 0,
                 "booked_room_count": 0,
             }
@@ -203,13 +212,19 @@ class ProductTemplate(models.Model):
             return result
 
         room_record = result["room_record"][0]
-        variants = self.env["product.product"].search(
-            [
+        if self.is_room_type:
+            variant_domain = [
+                ("is_room_type", "=", True),
+                ("active", "=", True),
+                ("product_tmpl_id", "=", self.id),
+            ]
+        else:
+            variant_domain = [
                 ("is_bookable", "=", True),
                 ("active", "=", True),
                 ("product_tmpl_id", "=", self.id),
             ]
-        )
+        variants = self.env["product.product"].search(variant_domain)
         total_count = len(variants)
         available_count = len(room_record.get("room_variant_data") or [])
         room_record.update(

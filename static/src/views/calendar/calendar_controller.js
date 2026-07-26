@@ -1,7 +1,6 @@
 /** @odoo-module **/
 
 import { patch } from "@web/core/utils/patch";
-import { deserializeDate } from "@web/core/l10n/dates";
 import { CalendarController } from "@web/views/calendar/calendar_controller";
 import { CalendarModel } from "@web/views/calendar/calendar_model";
 import { CalendarCommonRenderer } from "@web/views/calendar/calendar_common/calendar_common_renderer";
@@ -91,15 +90,12 @@ patch(CalendarModel.prototype, {
 
 	normalizeDashboardLineRecord(rawRecord) {
 		const res = super.normalizeRecord(rawRecord);
-		if (rawRecord.dashboard_is_day_long_tour && rawRecord.tour_date) {
-			const tourDay = deserializeDate(rawRecord.tour_date).startOf("day");
-			res.start = tourDay;
-			res.end = tourDay;
-			res.isAllDay = true;
-		}
 		const partnerName = rawRecord.partner_id?.[1] || "";
 		const productName = rawRecord.line_product_name || "";
 		res.title = `${res.title} ${partnerName} (${productName})`.trim();
+		if (rawRecord.dashboard_is_day_long_tour) {
+			res.isAllDay = true;
+		}
 		return res;
 	},
 });
@@ -110,16 +106,12 @@ patch(CalendarCommonRenderer.prototype, {
 		if (
 			this.props.model.resModel !== "hotel.booking" ||
 			!this.props.model.meta?.productData ||
-			!record.rawRecord?.dashboard_is_day_long_tour ||
-			!record.rawRecord?.tour_date
+			!record.rawRecord?.dashboard_is_day_long_tour
 		) {
 			return event;
 		}
-		const tourDay = deserializeDate(record.rawRecord.tour_date).startOf("day");
 		return {
 			...event,
-			start: tourDay.toISO(),
-			end: tourDay.plus({ days: 1 }).toISO(),
 			allDay: true,
 		};
 	},
@@ -133,7 +125,12 @@ patch(CalendarController.prototype, {
 		) {
 			record = { ...record, id: record.rawRecord.dashboard_booking_id };
 		}
-		return super.editRecord(record, context, shouldFetchFormViewId);
+		const action = await super.editRecord(record, context, shouldFetchFormViewId);
+		if (this.model.resModel === "hotel.booking" && this.model.meta?.productData) {
+			await this.model.load();
+			await this._refreshDashboardPanelAfterLoad();
+		}
+		return action;
 	},
 
 	openViewonClick(ev) {
@@ -200,7 +197,7 @@ patch(CalendarController.prototype, {
 		return roomData.find((room) => room.id === roomId);
 	},
 
-	_tourOccupancySummaryHtml(counts) {
+	_dayTourBookedSummaryHtml(counts) {
 		const maxOccupancy = counts.total ?? counts.day_tour_max_occupancy ?? 0;
 		const booked = counts.booked ?? counts.day_tour_booked_guests ?? 0;
 		const remaining = counts.available ?? counts.day_tour_remaining_occupancy ?? 0;
@@ -217,7 +214,7 @@ patch(CalendarController.prototype, {
 
 	_roomCountSummaryHtml(counts) {
 		if (this._isDayLongTourSelected()) {
-			return this._tourOccupancySummaryHtml(counts);
+			return this._dayTourBookedSummaryHtml(counts);
 		}
 		const total = counts.total ?? 0;
 		const available = counts.available ?? 0;
@@ -234,24 +231,137 @@ patch(CalendarController.prototype, {
 	},
 
 	_updateRoomCountSummary(counts) {
-		if (!$("#totalRoomCount").length) {
+		if (this._isDayLongTourSelected()) {
+			if ($("#totalRoomCount").length) {
+				$("#totalRoomCount").text(
+					counts.total ?? counts.day_tour_max_occupancy ?? 0
+				);
+				$("#bookedRoomCount").text(
+					counts.booked ?? counts.day_tour_booked_guests ?? 0
+				);
+				$("#remainingRoomCount").text(
+					counts.available ?? counts.day_tour_remaining_occupancy ?? 0
+				);
+			}
 			return;
 		}
-		if (this._isDayLongTourSelected()) {
-			$("#totalRoomCount").text(
-				counts.total ?? counts.day_tour_max_occupancy ?? 0
-			);
-			$("#bookedRoomCount").text(
-				counts.booked ?? counts.day_tour_booked_guests ?? 0
-			);
-			$("#remainingRoomCount, #availableRoomCount").text(
-				counts.available ?? counts.day_tour_remaining_occupancy ?? 0
-			);
+		if (!$("#totalRoomCount").length) {
 			return;
 		}
 		$("#totalRoomCount").text(counts.total ?? 0);
 		$("#availableRoomCount").text(counts.available ?? 0);
 		$("#bookedRoomCount").text(counts.booked ?? 0);
+	},
+
+	_renderDashboardRoomPanel(roomId, roomDetail, counts, isDayTour) {
+		const detailRows = isDayTour
+			? this._dayTourDetailHtml(roomDetail[0], counts)
+			: this.record_html(roomDetail);
+		const summaryHtml = this._roomCountSummaryHtml(counts);
+		const variantsSection = isDayTour
+			? ""
+			: `<h3 class="pt-2">Available room variants</h3>
+                <table id="availableRoomsTable">
+                ${this.record_html(roomDetail, true)}</table>`;
+
+		$("#roomInformation")
+			.html(
+				`
+                <div class="selected_room_container p-2" data-prod-tmplt=${roomId}>
+                <h3>${roomDetail[0].name}</h3>
+                <table>
+                ${isDayTour ? `<tbody>${detailRows}</tbody>` : detailRows}
+                </table>
+                ${summaryHtml}
+                ${variantsSection}</div>`,
+			)
+			.show();
+
+		$(".allBookingRoom")
+			.find(".o_calendar_filter_item")
+			.each(function () {
+				if ($(this).attr("data-value") === roomId.toString()) {
+					$(this).find("input").prop("checked", true).prop("disabled", false);
+				} else {
+					$(this).find("input").prop("checked", false).prop("disabled", true);
+				}
+			});
+	},
+
+	_countsFromRoomDetail(roomDetail, isDayTour) {
+		return {
+			total: roomDetail[0].total_room_count ?? roomDetail[0].day_tour_max_occupancy ?? 0,
+			available:
+				roomDetail[0].available_room_count ??
+				roomDetail[0].day_tour_remaining_occupancy ??
+				0,
+			booked:
+				roomDetail[0].booked_room_count ??
+				roomDetail[0].day_tour_booked_guests ??
+				0,
+			day_tour_max_occupancy: roomDetail[0].day_tour_max_occupancy,
+			day_tour_booked_guests: roomDetail[0].day_tour_booked_guests,
+			day_tour_remaining_occupancy: roomDetail[0].day_tour_remaining_occupancy,
+		};
+	},
+
+	async _refreshDashboardPanelAfterLoad() {
+		if (!this.selected_room) {
+			return;
+		}
+		await this.update_bookingCount(this.model.date.c, this.model.scale);
+		const shouldReloadPanel =
+			this.selected_room_is_day_long_tour ||
+			!$("#roomInformation .selected_room_container").length;
+		if (!shouldReloadPanel) {
+			return;
+		}
+		const d = await this.orm.call(
+			"product.template",
+			"fetch_data_for_room",
+			[[this.selected_room]],
+			{ selected_date: this.model.date.c },
+		);
+		this.model.room_book_ids = d.b_ids;
+		const roomDetail = d.room_record;
+		const isDayTour = Boolean(d.is_day_long_tour ?? roomDetail[0]?.is_day_long_tour);
+		this.selected_room_is_day_long_tour = isDayTour;
+		this.model.room_is_day_long_tour = isDayTour;
+		const counts = this._countsFromRoomDetail(roomDetail, isDayTour);
+		this._renderDashboardRoomPanel(this.selected_room, roomDetail, counts, isDayTour);
+	},
+
+	async update_bookingCount(calendar_data, scale) {
+		const booking_count = await this.orm.call(
+			"hotel.booking",
+			"fetch_booking_count_for_dashboard",
+			[],
+			{
+				calendar_data: calendar_data,
+				scale: scale,
+				dayInMonth: this.model.date.daysInMonth,
+				weekDay: this.model.date.weekday,
+				room: this.model.room_id,
+			},
+		);
+
+		this.model.meta.productData.check_in_booking = booking_count.check_in_booking;
+		this.model.meta.productData.check_out_booking = booking_count.check_out_booking;
+		this.model.meta.productData.booked_room_ids = booking_count.booked_room_ids;
+
+		$("#current_date_check_in").text(booking_count.current_month_check_in);
+		$("#current_date_check_out").text(booking_count.current_month_check_out);
+		$("#total_available_room").text(booking_count.available_rooms);
+		$("#total_booked_room").text(booking_count.booked_room_ids.length);
+
+		this.update_available_rooms_data(booking_count);
+	},
+
+	get rendererProps() {
+		if (this.model.resModel === "hotel.booking" && this.model.meta?.productData) {
+			void this._refreshDashboardPanelAfterLoad();
+		}
+		return super.rendererProps;
 	},
 
 	update_available_rooms_data(booking_count) {
@@ -322,54 +432,11 @@ patch(CalendarController.prototype, {
 		this.selected_room_is_day_long_tour = isDayTour;
 		this.model.room_is_day_long_tour = isDayTour;
 
-		const counts = {
-			total: room_detail[0].total_room_count ?? room_detail[0].day_tour_max_occupancy ?? 0,
-			available:
-				room_detail[0].available_room_count ??
-				room_detail[0].day_tour_remaining_occupancy ??
-				0,
-			booked:
-				room_detail[0].booked_room_count ??
-				room_detail[0].day_tour_booked_guests ??
-				0,
-			day_tour_max_occupancy: room_detail[0].day_tour_max_occupancy,
-			day_tour_booked_guests: room_detail[0].day_tour_booked_guests,
-			day_tour_remaining_occupancy: room_detail[0].day_tour_remaining_occupancy,
-		};
+		const counts = this._countsFromRoomDetail(room_detail, isDayTour);
+		this._renderDashboardRoomPanel(room_id, room_detail, counts, isDayTour);
 
-		const detailRows = isDayTour
-			? this._dayTourDetailHtml(room_detail[0], counts)
-			: this.record_html(room_detail);
-		const summaryHtml = this._roomCountSummaryHtml(counts);
-		const variantsSection = isDayTour
-			? ""
-			: `<h3 class="pt-2">Available room variants</h3>
-                <table id="availableRoomsTable">
-                ${this.record_html(room_detail, true)}</table>`;
-
-		$("#roomInformation")
-			.html(
-				`
-                <div class="selected_room_container p-2" data-prod-tmplt=${room_id}>
-                <h3>${room_detail[0].name}</h3>
-                <table>
-                ${isDayTour ? `<tbody>${detailRows}</tbody>` : detailRows}
-                </table>
-                ${summaryHtml}
-                ${variantsSection}</div>`,
-			)
-			.show();
-
-		$(".allBookingRoom")
-			.find(".o_calendar_filter_item")
-			.each(function () {
-				if ($(this).attr("data-value") === room_id.toString()) {
-					$(this).find("input").prop("checked", true).prop("disabled", false);
-				} else {
-					$(this).find("input").prop("checked", false).prop("disabled", true);
-				}
-			});
 		await this.model.load();
+		await this._refreshDashboardPanelAfterLoad();
 	},
 });
 
