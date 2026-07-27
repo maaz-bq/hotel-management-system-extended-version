@@ -10,6 +10,7 @@ from .day_tour_utils import (
     day_tour_line_guest_count,
     day_tour_line_window_error,
     day_tour_same_calendar_day,
+    day_tour_same_day_window,
     is_day_long_tour_product,
     stay_spans_multiple_days,
     stay_is_strict_subset,
@@ -53,8 +54,20 @@ class HotelBookingLine(models.Model):
     )
     max_infants = fields.Integer(related="product_tmpl_id.max_infants", string="Max Infants")
 
-    check_in = fields.Datetime(string="Check In", store=True, readonly=False)
-    check_out = fields.Datetime(string="Check Out", store=True, readonly=False)
+    check_in = fields.Datetime(
+        string="Check In",
+        store=True,
+        readonly=False,
+        copy=False,
+        related=False,
+    )
+    check_out = fields.Datetime(
+        string="Check Out",
+        store=True,
+        readonly=False,
+        copy=False,
+        related=False,
+    )
 
     booking_days = fields.Integer(
         string="Days Book For",
@@ -68,11 +81,20 @@ class HotelBookingLine(models.Model):
         related="booking_id.folio_product_ids",
         string="Allowed Folio Products",
     )
+    allowed_other_product_ids = fields.Many2many(
+        related="booking_id.other_item_product_ids",
+        string="Allowed Other Item Products",
+    )
     product_is_room_type = fields.Boolean(
         related="product_id.is_room_type",
     )
     product_is_bookable = fields.Boolean(
         related="product_id.is_bookable",
+    )
+    is_other_item_line = fields.Boolean(
+        string="Other Item Line",
+        default=False,
+        index=True,
     )
     is_other_product_line = fields.Boolean(
         string="Is Other Product Line",
@@ -104,6 +126,8 @@ class HotelBookingLine(models.Model):
             )
             if not tour_lines:
                 continue
+
+            tour_lines._ensure_day_tour_line_dates()
 
             if not booking.hotel_id:
                 raise ValidationError(
@@ -226,20 +250,24 @@ class HotelBookingLine(models.Model):
 
     @classmethod
     def _default_line_check_in_out(cls, product, booking):
+        if booking and booking.check_in and booking.check_out:
+            return booking.check_in, booking.check_out
         if is_day_long_tour_product(product):
             return day_tour_default_check_in_out(booking)
-        if booking:
-            return booking.check_in, booking.check_out
         return False, False
 
     def _ensure_day_tour_line_dates(self):
-        """Default same-day tour dates only when the line has none yet."""
+        """Keep day-long tour lines on a single calendar day."""
         for line in self.filtered(
             lambda booking_line: is_day_long_tour_product(booking_line.product_id)
         ):
-            if line.check_in and line.check_out:
+            if (
+                line.check_in
+                and line.check_out
+                and day_tour_same_calendar_day(line.check_in, line.check_out, line)
+            ):
                 continue
-            check_in, check_out = day_tour_default_check_in_out(line.booking_id)
+            check_in, check_out = day_tour_same_day_window(line)
             if check_in and check_out:
                 line._write_line_check_in_out(check_in, check_out)
 
@@ -263,6 +291,9 @@ class HotelBookingLine(models.Model):
             new_check_in = vals.get("check_in", line.check_in)
             new_check_out = vals.get("check_out", line.check_out)
             if not new_check_in or not new_check_out:
+                for field in ("check_in", "check_out"):
+                    if field in vals and not vals[field]:
+                        vals.pop(field)
                 continue
             restore_check_in = None
             restore_check_out = None
@@ -396,7 +427,6 @@ class HotelBookingLine(models.Model):
     def _sync_line_dates_from_booking(self):
         self._sync_room_line_dates_from_booking()
         self._sync_bookable_service_line_dates_from_booking()
-        self._ensure_day_tour_line_dates()
 
     @api.depends("product_id", "product_id.is_room_type", "product_id.is_bookable")
     def _compute_line_product_flags(self):
@@ -418,21 +448,101 @@ class HotelBookingLine(models.Model):
             "infant_guest": self.infant_count,
         }
 
+    @api.model
+    def _prepare_line_tab_flag_vals(self, vals):
+        vals = dict(vals)
+        if vals.get("product_id"):
+            product = self.env["product.product"].browse(vals["product_id"])
+            vals["is_other_item_line"] = _is_other_product(product)
+        elif "is_other_item_line" not in vals:
+            if self.env.context.get("booking_line_tab") == "other_items":
+                vals["is_other_item_line"] = True
+            else:
+                vals["is_other_item_line"] = bool(
+                    self.env.context.get("default_is_other_item_line")
+                )
+        return vals
+
+    def _find_unlinked_sale_order_line(self):
+        """Reuse an existing SO line for this product when re-syncing."""
+        self.ensure_one()
+        order = self.booking_id.order_id
+        if not order or not self.product_id:
+            return self.env["sale.order.line"]
+        linked_line_ids = set(
+            self.booking_id.booking_line_ids.mapped("sale_order_line_id").ids
+        )
+        return order.order_line.filtered(
+            lambda sol: (
+                sol.product_id == self.product_id
+                and sol.id not in linked_line_ids
+                and not sol.display_type
+            )
+        )[:1]
+
+    def _sync_to_sale_order_line(self, sale_line):
+        self.ensure_one()
+        sale_line.with_context(bypass_for_exchange_room=True).write(
+            {
+                "product_id": self.product_id.id,
+                "product_uom_qty": self.booking_days or self.booking_id.booking_days or 1,
+                "price_unit": self.price,
+                "tax_id": [(6, 0, self.tax_ids.ids)],
+                "discount": self.discount,
+                "guest_info_ids": [(6, 0, self.guest_info_ids.ids)],
+                "adult_guest": self.adult_count,
+                "children_guest": self.child_count,
+                "infant_guest": self.infant_count,
+            }
+        )
+
     def _ensure_sale_order_lines(self):
         SaleOrderLine = self.env["sale.order.line"]
+        bookings = self.env["hotel.booking"]
         for line in self:
             if (
                 line.sale_order_line_id
-                or not line.booking_id.order_id
                 or not line.product_id
                 or line.display_type
             ):
+                if line.sale_order_line_id:
+                    line._sync_to_sale_order_line(line.sale_order_line_id)
+                    bookings |= line.booking_id
                 continue
+            booking = line.booking_id
+            if not booking.order_id:
+                booking._ensure_hotel_quotation()
+            if not booking.order_id:
+                continue
+            order = booking.order_id
+            existing_line = line._find_unlinked_sale_order_line()
+            if existing_line:
+                line.with_context(
+                    bypass_for_exchange_room=True,
+                    skip_ensure_sale_order_lines=True,
+                ).write({"sale_order_line_id": existing_line.id})
+                line._sync_to_sale_order_line(existing_line)
+                bookings |= booking
+                continue
+            restore_state = None
+            if order.state not in ("draft", "sent", "cancel"):
+                restore_state = order.state
+                order.with_context(bypass_checkin_checkout=True).write(
+                    {"state": "draft"}
+                )
             sale_line = SaleOrderLine.create(line._prepare_sale_order_line_vals())
             line.with_context(
                 bypass_for_exchange_room=True,
                 skip_ensure_sale_order_lines=True,
             ).write({"sale_order_line_id": sale_line.id})
+            if restore_state:
+                order.with_context(bypass_checkin_checkout=True).write(
+                    {"state": restore_state}
+                )
+            bookings |= booking
+        if bookings:
+            bookings._cleanup_orphan_sale_order_lines()
+            bookings._sync_sale_order_flags()
 
     def _break_sale_order_line_link(self):
         """Clear sale_order_line_id without recreating quotation lines."""
@@ -487,7 +597,9 @@ class HotelBookingLine(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
+        prepared_vals_list = []
         for vals in vals_list:
+            vals = self._prepare_line_tab_flag_vals(vals)
             if vals.get("product_id"):
                 product = self.env["product.product"].browse(vals["product_id"])
                 if product and product.taxes_id:
@@ -495,7 +607,10 @@ class HotelBookingLine(models.Model):
                 elif "tax_ids" not in vals:
                     vals["tax_ids"] = [(5, 0, 0)]
                 booking = self.env["hotel.booking"].browse(vals.get("booking_id"))
-                if not vals.get("check_in") or not vals.get("check_out"):
+                if _is_other_product(product):
+                    vals.pop("check_in", None)
+                    vals.pop("check_out", None)
+                elif not vals.get("check_in") or not vals.get("check_out"):
                     check_in, check_out = self._default_line_check_in_out(product, booking)
                     vals.setdefault("check_in", check_in)
                     vals.setdefault("check_out", check_out)
@@ -509,16 +624,22 @@ class HotelBookingLine(models.Model):
                     vals["booking_days"] = max(guest_total, 1)
                 elif product.is_room_type and not vals.get("adult_count"):
                     vals["adult_count"] = 1
+                    vals.setdefault("booking_days", 1)
                 elif _is_other_product(product):
+                    vals["is_other_item_line"] = True
                     vals["booking_days"] = vals.get("booking_days") or 1
                     vals["adult_count"] = 0
                     vals["child_count"] = 0
                     vals["infant_count"] = 0
                     vals["driver_count"] = 0
+            prepared_vals_list.append(vals)
 
-        records = super().create(vals_list)
-        records.with_context(skip_sync_folio_line_dates=True)._sync_line_dates_from_booking()
-        records.filtered(
+        records = super().create(prepared_vals_list)
+        folio_records = records.filtered(lambda line: not line.is_other_item_line)
+        folio_records.with_context(
+            skip_sync_folio_line_dates=True
+        )._sync_line_dates_from_booking()
+        folio_records.filtered(
             lambda line: is_day_long_tour_product(line.product_id)
         )._inherit_room_guest_counts_for_day_tour()
         records._sync_service_product_taxes()
@@ -540,24 +661,25 @@ class HotelBookingLine(models.Model):
     )
     def _compute_booking_days(self):
         lines_for_super = self.filtered(
-            lambda line: not _is_other_product(line.product_id)
+            lambda line: (
+                not _is_other_product(line.product_id)
+                and not (line.product_id and line.product_id.is_room_type)
+            )
         )
         super(HotelBookingLine, lines_for_super)._compute_booking_days()
-        bookings_to_sync = self.env["hotel.booking"]
+        for line in self.filtered(
+            lambda booking_line: (
+                booking_line.product_id and booking_line.product_id.is_room_type
+            )
+        ):
+            if not line.booking_days:
+                line.booking_days = 1
         for line in self:
             if _is_other_product(line.product_id):
                 continue
-            if (
-                line.product_id
-                and line.product_id.is_room_type
-                and line.booking_id.check_in
-                and line.booking_id.check_out
-                and line.booking_days < 1
+            if _is_bookable_service_product(line.product_id) and not (
+                line.product_id and line.product_id.is_room_type
             ):
-                line.booking_days = 1
-                if not line.booking_id.booking_days:
-                    bookings_to_sync |= line.booking_id
-            elif _is_bookable_service_product(line.product_id):
                 line.booking_days = max(
                     (line.adult_count or 0)
                     + (line.child_count or 0)
@@ -565,12 +687,16 @@ class HotelBookingLine(models.Model):
                     + (line.infant_count or 0),
                     1,
                 )
-        if bookings_to_sync:
-            bookings_to_sync._compute_booking_days()
 
     def _inverse_booking_days(self):
         for line in self.filtered(
-            lambda booking_line: _is_other_product(booking_line.product_id)
+            lambda booking_line: (
+                _is_other_product(booking_line.product_id)
+                or (
+                    booking_line.product_id
+                    and booking_line.product_id.is_room_type
+                )
+            )
         ):
             qty = max(line.booking_days or 1, 1)
             line.booking_days = qty
@@ -624,6 +750,7 @@ class HotelBookingLine(models.Model):
                 continue
 
             line.tax_ids = product.taxes_id
+            line.is_other_item_line = _is_other_product(product)
 
             if product.is_room_type:
                 if not line.adult_count:
@@ -631,6 +758,7 @@ class HotelBookingLine(models.Model):
                 if booking.check_in and booking.check_out:
                     line.check_in = booking.check_in
                     line.check_out = booking.check_out
+                line.booking_days = 1
                 if (
                     booking.check_in
                     and booking.check_out
@@ -661,9 +789,9 @@ class HotelBookingLine(models.Model):
                 )
                 line.booking_days = max(guest_total, 1)
                 if is_day_long_tour_product(product):
-                    check_in, check_out = day_tour_default_check_in_out(booking)
-                    line.check_in = check_in
-                    line.check_out = check_out
+                    if booking.check_in and booking.check_out:
+                        line.check_in = booking.check_in
+                        line.check_out = booking.check_out
                     line._inherit_room_guest_counts_for_day_tour(use_write=False)
                 elif booking.check_in and booking.check_out:
                     line.check_in = booking.check_in
@@ -672,8 +800,6 @@ class HotelBookingLine(models.Model):
                 if warning:
                     return {"warning": warning}
             elif _is_other_product(product):
-                line.check_in = booking.check_in
-                line.check_out = booking.check_out
                 line.adult_count = 0
                 line.child_count = 0
                 line.infant_count = 0
@@ -687,22 +813,8 @@ class HotelBookingLine(models.Model):
 
     @api.constrains("check_in", "check_out", "product_id")
     def _check_day_tour_same_calendar_day(self):
-        for line in self.filtered(
-            lambda booking_line: is_day_long_tour_product(booking_line.product_id)
-        ):
-            if not line.check_in or not line.check_out:
-                raise ValidationError(
-                    _("Please set check-in and check-out for day-long tour '%(tour)s'.")
-                    % {"tour": line.product_id.display_name}
-                )
-            if not day_tour_same_calendar_day(line.check_in, line.check_out, line):
-                raise ValidationError(
-                    _(
-                        "Check-in and check-out must be on the same calendar date "
-                        "for day-long tour '%(tour)s'."
-                    )
-                    % {"tour": line.product_id.display_name}
-                )
+        # Save-time validation disabled; day-tour rules run on confirm instead.
+        return
 
     @api.constrains(
         "product_id",
@@ -715,34 +827,18 @@ class HotelBookingLine(models.Model):
         "driver_count",
     )
     def _check_day_tour_occupancy(self):
-        self._validate_day_tour_occupancy()
+        # Save-time validation disabled; day-tour rules run on confirm instead.
+        return
+
+    @api.constrains("product_id", "is_other_item_line")
+    def _check_line_tab_product_consistency(self):
+        # Save-time validation disabled.
+        return
 
     @api.constrains("product_id", "booking_id")
     def _check_folio_product_selection(self):
-        for line in self:
-            product = line.product_id
-            booking = line.booking_id
-            if not product or not booking:
-                continue
-
-            if product.id not in booking._get_folio_available_product_ids():
-                raise ValidationError(
-                    _("%s is not available for this booking.")
-                    % product.display_name
-                )
-
-            if product.is_room_type:
-                duplicate_room = booking.booking_line_ids.filtered(
-                    lambda booking_line: (
-                        booking_line.product_id == product
-                        and booking_line.id != line.id
-                    )
-                )
-                if duplicate_room:
-                    raise ValidationError(
-                        _("Room %s is already on this folio.")
-                        % product.display_name
-                    )
+        # Save-time validation disabled.
+        return
 
     @api.onchange("check_in", "check_out")
     def _onchange_folio_line_check_in_out(self):
@@ -797,8 +893,16 @@ class HotelBookingLine(models.Model):
             ):
                 line.check_out = day_tour_end_of_calendar_day(line, line.check_in)
 
+            date_warning = booking._folio_line_header_date_conflict(
+                line, line.check_in, line.check_out
+            )
             warning = line._day_tour_occupancy_warning()
-            if warning:
+            if date_warning:
+                warning_payload = {
+                    "title": _("Date mismatch"),
+                    "message": date_warning,
+                }
+            elif warning:
                 warning_payload = warning
 
         if warning_payload:
@@ -897,6 +1001,10 @@ class HotelBookingLine(models.Model):
             "sale_order_line_id" in vals and not vals.get("sale_order_line_id")
         )
         vals = dict(vals)
+        if vals.get("product_id"):
+            product = self.env["product.product"].browse(vals["product_id"])
+            if product:
+                vals["is_other_item_line"] = _is_other_product(product)
         tour_lines = self.browse()
         lines_for_super = self
         date_fields = ("check_in", "check_out")
@@ -906,13 +1014,23 @@ class HotelBookingLine(models.Model):
                 lambda line: is_day_long_tour_product(line.product_id)
             )
             if tour_lines:
-                check_in = vals.get("check_in")
-                check_out = vals.get("check_out")
                 for line in tour_lines:
-                    line._write_line_check_in_out(
-                        check_in if check_in is not None else line.check_in,
-                        check_out if check_out is not None else line.check_out,
+                    check_in = (
+                        vals["check_in"]
+                        if "check_in" in vals
+                        else line.check_in
                     )
+                    check_out = (
+                        vals["check_out"]
+                        if "check_out" in vals
+                        else line.check_out
+                    )
+                    if check_in and check_out and not day_tour_same_calendar_day(
+                        check_in, check_out, line
+                    ):
+                        check_out = day_tour_end_of_calendar_day(line, check_in)
+                    if check_in and check_out:
+                        line._write_line_check_in_out(check_in, check_out)
                 lines_for_super = self - tour_lines
 
         if lines_for_super:
@@ -924,7 +1042,13 @@ class HotelBookingLine(models.Model):
                 room_vals = self._protect_room_line_date_vals(vals, room_lines)
                 super(HotelBookingLine, room_lines).write(room_vals)
                 if non_room_lines:
-                    rec = super(HotelBookingLine, non_room_lines).write(vals)
+                    non_room_vals = dict(vals)
+                    if non_room_lines.filtered(
+                        lambda line: _is_other_product(line.product_id)
+                    ):
+                        for field in date_fields:
+                            non_room_vals.pop(field, None)
+                    rec = super(HotelBookingLine, non_room_lines).write(non_room_vals)
                 else:
                     rec = True
             else:

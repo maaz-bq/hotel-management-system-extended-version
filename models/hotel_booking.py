@@ -21,6 +21,11 @@ class HotelBooking(models.Model):
 
     def _prepare_hotel_quotation_vals(self):
         self.ensure_one()
+        has_room_lines = any(
+            line.product_id.is_room_type
+            for line in self.booking_line_ids
+            if line.product_id
+        )
         return {
             "partner_id": self.partner_id.id,
             "booking_id": self.id,
@@ -29,9 +34,25 @@ class HotelBooking(models.Model):
             "pricelist_id": self.pricelist_id.id if self.pricelist_id else False,
             "hotel_id": self.hotel_id.id if self.hotel_id else False,
             "booking_count": 1,
-            "is_room_type": True,
+            "is_room_type": has_room_lines,
             "company_id": self.company_id.id,
         }
+
+    def _sync_sale_order_flags(self):
+        """Keep sale order header flags aligned with folio content."""
+        for booking in self:
+            order = booking.order_id
+            if not order:
+                continue
+            has_room_lines = any(
+                line.product_id.is_room_type
+                for line in booking.booking_line_ids
+                if line.product_id
+            )
+            if order.is_room_type != has_room_lines:
+                order.with_context(bypass_checkin_checkout=True).write(
+                    {"is_room_type": has_room_lines}
+                )
 
     def _ensure_hotel_quotation(self):
         SaleOrder = self.env["sale.order"]
@@ -42,7 +63,6 @@ class HotelBooking(models.Model):
                 booking._prepare_hotel_quotation_vals()
             )
             booking.order_id = quotation.id
-            booking.booking_line_ids._ensure_sale_order_lines()
 
     def _cleanup_orphan_sale_order_lines(self):
         """Drop quotation lines that no longer have a matching folio line."""
@@ -155,13 +175,6 @@ class HotelBooking(models.Model):
         current_day_tours = self.booking_line_ids.filtered(
             lambda line: is_day_long_tour_product(line.product_id)
         ).mapped("product_id")
-        others = Product.search(
-            common
-            + [
-                ("is_bookable", "=", False),
-                ("product_tmpl_id.is_room_type", "=", False),
-            ]
-        )
 
         rooms = Product
         current_rooms = self.booking_line_ids.filtered(
@@ -177,8 +190,35 @@ class HotelBooking(models.Model):
         rooms = rooms | current_rooms
 
         return (
-            rooms | services | available_day_tours | current_day_tours | others
+            rooms | services | available_day_tours | current_day_tours
         ).ids
+
+    def _get_other_item_available_product_ids(self):
+        """Non-bookable products selectable on the Other Items tab."""
+        self.ensure_one()
+        Product = self.env["product.product"]
+        others = Product.search(
+            self._folio_common_product_domain()
+            + [
+                ("is_bookable", "=", False),
+                ("product_tmpl_id.is_room_type", "=", False),
+            ]
+        )
+        current_other_products = self.other_item_line_ids.mapped("product_id")
+        return (others | current_other_products).ids
+
+    other_item_product_ids = fields.Many2many(
+        comodel_name="product.product",
+        compute="_compute_other_item_product_ids",
+        string="Other Item Product Selection",
+    )
+
+    @api.depends("company_id", "booking_line_ids.product_id")
+    def _compute_other_item_product_ids(self):
+        for booking in self:
+            booking.other_item_product_ids = [
+                (6, 0, booking._get_other_item_available_product_ids())
+            ]
 
     def _filter_day_tours_with_capacity(self, products):
         """Day-long tours stay selectable while daily capacity remains."""
@@ -300,6 +340,18 @@ class HotelBooking(models.Model):
         compute="_compute_folio_product_ids",
         string="Folio Product Selection",
     )
+    folio_line_ids = fields.One2many(
+        comodel_name="hotel.booking.line",
+        inverse_name="booking_id",
+        string="Folio Lines",
+        domain=[("is_other_item_line", "=", False)],
+    )
+    other_item_line_ids = fields.One2many(
+        comodel_name="hotel.booking.line",
+        inverse_name="booking_id",
+        string="Other Items",
+        domain=[("is_other_item_line", "=", True)],
+    )
 
     @api.depends(
         "check_in",
@@ -315,9 +367,8 @@ class HotelBooking(models.Model):
             ]
 
     def action_add_other_products(self):
-        """Deprecated: folio lines are added inline on the booking form."""
+        """Deprecated: other items are added inline on the booking form."""
         self.ensure_one()
-        products = self.env["product.product"].search(self._other_product_domain())
         return {
             "name": "Add Other Products",
             "type": "ir.actions.act_window",
@@ -330,7 +381,7 @@ class HotelBooking(models.Model):
             "context": {
                 "default_booking_id": self.id,
                 "default_booking_days": 1,
-                "default_product_ids": products.ids,
+                "default_product_ids": self._get_other_item_available_product_ids(),
             },
         }
 
@@ -503,6 +554,191 @@ class HotelBooking(models.Model):
         if not check_ins or not check_outs:
             return self.check_in, self.check_out
         return min(check_ins), max(check_outs)
+
+    def _day_tour_stay_dates_from_lines(self, tour_lines):
+        check_ins = [dt for dt in tour_lines.mapped("check_in") if dt]
+        check_outs = [dt for dt in tour_lines.mapped("check_out") if dt]
+        if not check_ins or not check_outs:
+            return False, False
+        return min(check_ins), max(check_outs)
+
+    def _get_day_tour_stay_dates(self):
+        """Return the combined stay window from day-long tour folio lines."""
+        self.ensure_one()
+        tour_lines = self.booking_line_ids.filtered(
+            lambda line: is_day_long_tour_product(line.product_id)
+        )
+        if not tour_lines:
+            return False, False
+        tour_lines._ensure_day_tour_line_dates()
+        return self._day_tour_stay_dates_from_lines(tour_lines)
+
+    def _has_room_folio_lines(self):
+        self.ensure_one()
+        return bool(
+            self.booking_line_ids.filtered(
+                lambda line: line.product_id and line.product_id.is_room_type
+            )
+        )
+
+    def _get_room_folio_stay_dates(self):
+        """Min/max stay window from room folio lines."""
+        self.ensure_one()
+        room_lines = self.booking_line_ids.filtered(
+            lambda line: line.product_id and line.product_id.is_room_type
+        )
+        check_ins = [dt for dt in room_lines.mapped("check_in") if dt]
+        check_outs = [dt for dt in room_lines.mapped("check_out") if dt]
+        if not check_ins or not check_outs:
+            return False, False
+        return min(check_ins), max(check_outs)
+
+    def _stay_calendar_bounds(self, check_in, check_out):
+        if not check_in or not check_out:
+            return False, False
+        start = fields.Datetime.context_timestamp(self, check_in).date()
+        end = fields.Datetime.context_timestamp(self, check_out).date()
+        return start, end
+
+    def _format_stay_bounds_label(self, check_in, check_out):
+        start, end = self._stay_calendar_bounds(check_in, check_out)
+        if not start or not end:
+            return _("-")
+        if start == end:
+            return start.strftime("%Y-%m-%d")
+        return "%s – %s" % (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+
+    def _get_date_check_folio_lines(self):
+        """Folio lines whose stay dates must agree with the booking header."""
+        self.ensure_one()
+        return self.booking_line_ids.filtered(
+            lambda line: (
+                line.product_id
+                and not line.is_other_item_line
+                and (
+                    line.product_id.is_room_type
+                    or is_day_long_tour_product(line.product_id)
+                )
+            )
+        )
+
+    def _get_stored_line_stay_datetimes(self, lines):
+        """Read persisted line dates directly (avoid related-field shadowing)."""
+        dates = {}
+        stored_lines = lines.filtered("id")
+        if stored_lines:
+            self.env.cr.execute(
+                """
+                SELECT id, check_in, check_out
+                FROM hotel_booking_line
+                WHERE id = ANY(%s)
+                """,
+                (stored_lines.ids,),
+            )
+            for line_id, check_in, check_out in self.env.cr.fetchall():
+                if not check_in or not check_out:
+                    line = stored_lines.browse(line_id)
+                    check_in = check_in or line.check_in
+                    check_out = check_out or line.check_out
+                dates[line_id] = (check_in, check_out)
+        for line in lines - stored_lines:
+            dates[line.id] = (line.check_in, line.check_out)
+        return dates
+
+    def _folio_line_header_date_conflict(self, line, line_in, line_out):
+        """Return a warning when one folio line disagrees with the booking header."""
+        self.ensure_one()
+        if (
+            not line.product_id
+            or line.is_other_item_line
+            or not (line.product_id.is_room_type or is_day_long_tour_product(line.product_id))
+        ):
+            return False
+
+        header_in, header_out = self.check_in, self.check_out
+        if not header_in or not header_out or not line_in or not line_out:
+            return False
+
+        header_start, header_end = self._stay_calendar_bounds(header_in, header_out)
+        line_start, line_end = self._stay_calendar_bounds(line_in, line_out)
+        if not header_start or not header_end or not line_start or not line_end:
+            return False
+
+        header_label = self._format_stay_bounds_label(header_in, header_out)
+        folio_label = self._format_stay_bounds_label(line_in, line_out)
+        product_name = line.product_id.display_name
+        room_lines = self.booking_line_ids.filtered(
+            lambda booking_line: (
+                booking_line.product_id and booking_line.product_id.is_room_type
+            )
+        )
+
+        if line.product_id.is_room_type:
+            if line_start != header_start or line_end != header_end:
+                return _(
+                    "The booking header check-in/check-out (%(header)s) does not "
+                    "match the folio line check-in/check-out (%(folio)s) for "
+                    "'%(product)s'."
+                ) % {
+                    "header": header_label,
+                    "folio": folio_label,
+                    "product": product_name,
+                }
+            return False
+
+        if not room_lines:
+            if line_start != header_start or line_end != header_end:
+                return _(
+                    "The booking header check-in/check-out (%(header)s) does not "
+                    "match the folio line check-in/check-out (%(folio)s) for "
+                    "'%(product)s'."
+                ) % {
+                    "header": header_label,
+                    "folio": folio_label,
+                    "product": product_name,
+                }
+            return False
+
+        if line_start < header_start or line_end > header_end:
+            return _(
+                "The folio line check-in/check-out (%(folio)s) for '%(product)s' "
+                "exceeds the booking header check-in/check-out (%(header)s)."
+            ) % {
+                "folio": folio_label,
+                "product": product_name,
+                "header": header_label,
+            }
+        return False
+
+    def _get_header_folio_date_mismatch_message(self):
+        """Return a warning message when header and folio stay dates disagree."""
+        self.ensure_one()
+        header_in, header_out = self.check_in, self.check_out
+        if not header_in or not header_out:
+            return _("Please set check-in and check-out on the booking header.")
+
+        stay_lines = self._get_date_check_folio_lines()
+        if not stay_lines:
+            return False
+
+        line_dates = self._get_stored_line_stay_datetimes(stay_lines)
+        mismatches = []
+        for line in stay_lines:
+            line_in, line_out = line_dates.get(line.id, (False, False))
+            if not line_in or not line_out:
+                return _(
+                    "Please set check-in and check-out on folio line '%(product)s'."
+                ) % {"product": line.product_id.display_name}
+            conflict = self._folio_line_header_date_conflict(line, line_in, line_out)
+            if conflict:
+                mismatches.append(conflict)
+
+        if mismatches:
+            return "%s\n\n%s" % (
+                _("Please align the dates before confirming:"),
+                "\n".join(mismatches),
+            )
+        return False
 
     def _apply_booking_header_stay_dates(self):
         """Keep room folio lines aligned with the booking stay header."""
@@ -678,11 +914,8 @@ class HotelBooking(models.Model):
 
     @api.constrains("check_in", "check_out", "hotel_id")
     def _check_day_tour_occupancy_on_booking(self):
-        day_tour_lines = self.mapped("booking_line_ids").filtered(
-            lambda line: line.product_id.product_tmpl_id.is_day_long_tour
-        )
-        if day_tour_lines:
-            day_tour_lines._validate_day_tour_occupancy()
+        # Save-time validation disabled; day-tour rules run on confirm instead.
+        return
 
     def _sync_folio_line_dates(self):
         """Sync stay dates from the booking header without touching day-tour lines."""
@@ -701,9 +934,21 @@ class HotelBooking(models.Model):
 
     def write(self, vals):
         vals = dict(vals)
-        if not self.env.context.get("skip_protect_booking_stay") and any(
+        # Readonly header dates on confirmed bookings are often posted as False on save.
+        for field in ("check_in", "check_out"):
+            if field in vals and not vals[field]:
+                vals.pop(field)
+        header_snapshots = {}
+        header_fields_in_vals = any(
             field in vals for field in ("check_in", "check_out")
-        ):
+        )
+        if header_fields_in_vals:
+            for booking in self:
+                header_snapshots[booking.id] = (
+                    booking.check_in,
+                    booking.check_out,
+                )
+        if not self.env.context.get("skip_protect_booking_stay") and header_fields_in_vals:
             for booking in self:
                 room_lines = booking.booking_line_ids.filtered(
                     lambda line: line.product_id and line.product_id.is_room_type
@@ -741,8 +986,15 @@ class HotelBooking(models.Model):
         res = super().write(vals)
         if self.env.context.get("skip_sync_folio_line_dates"):
             return res
-        if any(field in vals for field in ("check_in", "check_out")):
-            self.with_context(skip_sync_folio_line_dates=True)._sync_folio_line_dates()
+        if header_fields_in_vals:
+            bookings_to_sync = self.filtered(
+                lambda booking: header_snapshots.get(booking.id)
+                != (booking.check_in, booking.check_out)
+            )
+            if bookings_to_sync:
+                bookings_to_sync.with_context(
+                    skip_sync_folio_line_dates=True
+                )._sync_folio_line_dates()
         return res
 
     def _prepare_dashboard_calendar_line_event(self, line):
@@ -825,7 +1077,10 @@ class HotelBooking(models.Model):
             for line in booking.booking_line_ids.filtered(
                 lambda booking_line: (
                     booking_line.product_id
-                    and booking_line.product_id.is_room_type
+                    and (
+                        booking_line.product_id.is_room_type
+                        or is_day_long_tour_product(booking_line.product_id)
+                    )
                     and not booking_line.guest_info_ids
                     and not (
                         booking_line.adult_count
@@ -850,6 +1105,16 @@ class HotelBooking(models.Model):
                     )
 
     def action_confirm_booking(self):
+        initial_bookings = self.filtered(lambda booking: booking.status_bar == "initial")
+        for booking in initial_bookings:
+            mismatch = booking._get_header_folio_date_mismatch_message()
+            if mismatch:
+                return self.env["wk.wizard.message"].genrated_message(
+                    "<span class='text-danger' style='font-weight:bold;'>%s</span>"
+                    % mismatch.replace("\n", "<br/>"),
+                    name=_("Warning"),
+                )
+
         self._ensure_booking_line_guests()
         self.validate_guest()
         if not self.env.context.get("bypass_checkin_checkout", False):
@@ -857,6 +1122,20 @@ class HotelBooking(models.Model):
 
         if self.status_bar == "initial":
             stay_snapshots = self._snapshot_booking_stay_dates()
+            if not self.booking_line_ids:
+                raise ValidationError(
+                    _("Please add rooms or day-long tours for booking confirmation!")
+                )
+            room_lines = self.booking_line_ids.filtered(
+                lambda line: line.product_id and line.product_id.is_room_type
+            )
+            tour_lines = self.booking_line_ids.filtered(
+                lambda line: is_day_long_tour_product(line.product_id)
+            )
+            if not room_lines and not tour_lines:
+                raise ValidationError(
+                    _("Please add rooms or day-long tours for booking confirmation!")
+                )
             conflict = self.check_selected_rooms_availability(self.check_in, self.check_out)
             if conflict["message"]:
                 return self.env["wk.wizard.message"].genrated_message(
@@ -869,18 +1148,14 @@ class HotelBooking(models.Model):
                 raise ValidationError(_("Please specify the agent commission on agent info tab!"))
             if self.booking_reference == "via_agent" and self.commission_type == "percentage" and not self.agent_commission_percentage:
                 raise ValidationError(_("Please specify the agent commission on agent info tab!"))
-            if not self.booking_line_ids:
-                raise ValidationError(_("Please add rooms for booking confirmation!"))
-            room_lines = self.booking_line_ids.filtered(
-                lambda line: line.product_id and line.product_id.is_room_type
-            )
+            confirm_lines = room_lines or tour_lines
             if not all(
                 [
                     line.guest_info_ids.ids
                     or line.adult_count
                     or line.child_count
                     or line.infant_count
-                    for line in room_lines
+                    for line in confirm_lines
                 ]
             ):
                 raise ValidationError(_("Please fill the members details !!"))

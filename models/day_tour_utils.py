@@ -56,10 +56,17 @@ def day_tour_default_check_in_out(booking):
     tour_date = fields.Datetime.context_timestamp(
         booking, booking.check_in
     ).date()
-    return (
-        datetime.combine(tour_date, time.min),
-        datetime.combine(tour_date, time.max),
-    )
+    return day_tour_day_bounds(tour_date)
+
+
+def day_tour_same_day_window(line):
+    """Same-calendar-day check-in/out for a day-long tour line."""
+    tour_date = day_tour_line_calendar_date(line)
+    if not tour_date and line.booking_id:
+        return day_tour_default_check_in_out(line.booking_id)
+    if not tour_date:
+        return False, False
+    return day_tour_day_bounds(tour_date)
 
 
 def stay_spans_multiple_days(check_in, check_out, record=None):

@@ -32,6 +32,37 @@ class ProductTemplate(models.Model):
         "calendar day at one hotel.",
     )
 
+    @api.model
+    def _get_day_long_tour_category(self):
+        """Return the existing All / Day-Long product category, if configured."""
+        return self.env["product.category"].search(
+            [
+                ("name", "in", ["Day-Long", "Day Long"]),
+                ("parent_id.name", "=", "All"),
+            ],
+            limit=1,
+        )
+
+    def _assign_day_long_tour_category_vals(self, vals):
+        if not vals.get("is_day_long_tour"):
+            return vals
+        category = self._get_day_long_tour_category()
+        if category:
+            vals = dict(vals)
+            vals["categ_id"] = category.id
+        return vals
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        prepared_vals_list = [
+            self._assign_day_long_tour_category_vals(vals) for vals in vals_list
+        ]
+        return super().create(prepared_vals_list)
+
+    def write(self, vals):
+        vals = self._assign_day_long_tour_category_vals(vals)
+        return super().write(vals)
+
     @api.onchange("is_room_type")
     def _onchange_is_room_type(self):
         if self.is_room_type:
@@ -43,6 +74,9 @@ class ProductTemplate(models.Model):
         if self.is_day_long_tour:
             self.is_bookable = True
             self.is_room_type = False
+            category = self._get_day_long_tour_category()
+            if category:
+                self.categ_id = category
 
     @api.constrains(
         "is_day_long_tour",

@@ -5,13 +5,22 @@
         <field name="model">hotel.booking</field>
         <field name="inherit_id" ref="hotel_management_system.hotel_booking_view_form" />
         <field name="arch" type="xml">
+            <xpath expr="//field[@name='check_in'][@required='True']" position="attributes">
+                <attribute name="force_save">1</attribute>
+            </xpath>
+            <xpath expr="//field[@name='check_out'][@required='True']" position="attributes">
+                <attribute name="force_save">1</attribute>
+            </xpath>
             <xpath expr="//page[field[@name='booking_line_ids']]" position="replace">
                 <page string="Folio">
                     <field name="folio_product_ids" invisible="1" />
-                    <field name="booking_line_ids" readonly="status_bar != 'initial'"
-                        nolabel="1" mode="list" required="True">
+                    <field name="folio_line_ids" readonly="status_bar != 'initial'"
+                        nolabel="1" mode="list"
+                        context="{'default_is_other_item_line': False}">
                         <list editable="bottom">
                             <field name="allowed_product_ids" column_invisible="True" />
+                            <field name="is_other_item_line" column_invisible="True" />
+                            <field name="status_bar" column_invisible="True" />
                             <field name="product_id" string="Product Variant"
                                 domain="[('id', 'in', allowed_product_ids)]"
                                 widget="sol_product_many2one"
@@ -23,17 +32,17 @@
                             <field name="check_in" string="Check In"
                                 widget="datetime"
                                 force_save="1"
-                                readonly="status_bar != 'initial'"
+                                readonly="parent.status_bar != 'initial'"
                                 invisible="not product_id or (not product_is_room_type and not product_is_day_long_tour)"
                                 required="product_is_room_type or product_is_day_long_tour" />
                             <field name="check_out" string="Check Out"
                                 widget="datetime"
                                 force_save="1"
-                                readonly="status_bar != 'initial'"
+                                readonly="parent.status_bar != 'initial'"
                                 invisible="not product_id or (not product_is_room_type and not product_is_day_long_tour)"
                                 required="product_is_room_type or product_is_day_long_tour" />
                             <field name="booking_days" string="Qty" force_save="1"
-                                readonly="not product_id or product_is_room_type or product_is_bookable" />
+                                readonly="not product_id or (product_is_bookable and not product_is_room_type)" />
                             <field name="adult_count" string="Adults"
                                 invisible="not product_id or (not product_id.is_room_type and not product_id.is_bookable)" />
                             <field name="child_count" string="Children"
@@ -58,6 +67,33 @@
                         <field name="balance_amount" string="Balance Amount" widget="monetary"
                             options="{'currency_field': 'currency_id'}" />
                     </group>
+                </page>
+                <page string="Other Items">
+                    <field name="other_item_product_ids" invisible="1" />
+                    <field name="other_item_line_ids"
+                        readonly="status_bar in ('checkout', 'cancel')"
+                        nolabel="1" mode="list"
+                        context="{'booking_line_tab': 'other_items', 'default_is_other_item_line': True}">
+                        <list editable="bottom">
+                            <field name="allowed_other_product_ids" column_invisible="True" />
+                            <field name="is_other_item_line" column_invisible="True" force_save="1" />
+                            <field name="product_id" string="Product"
+                                domain="[('id', 'in', allowed_other_product_ids)]"
+                                widget="sol_product_many2one"
+                                required="1" />
+                            <field name="is_other_product_line" column_invisible="True" />
+                            <field name="booking_days" string="Qty" force_save="1" />
+                            <field name="price" string="Unit Price" widget="monetary"
+                                options="{'currency_field':'currency_id'}" />
+                            <field name="discount" groups="sale.group_discount_per_so_line" />
+                            <field name="line_tax_amount" string="Tax" widget="monetary"
+                                options="{'currency_field':'currency_id'}" />
+                            <field name="subtotal_price" string="Amount" widget="monetary"
+                                options="{'currency_field':'currency_id'}" />
+                            <field name="taxed_price" string="Total" widget="monetary"
+                                options="{'currency_field':'currency_id'}" />
+                        </list>
+                    </field>
                 </page>
             </xpath>
         </field>
