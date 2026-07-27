@@ -9,6 +9,7 @@ from odoo.exceptions import ValidationError
 from .checkin_utils import truncate_minutes_seconds
 from .day_tour_utils import (
     CONFIRMED_BOOKING_STATUSES,
+    day_tour_line_calendar_date,
     is_day_long_tour_product,
     stay_spans_multiple_days,
     stay_is_strict_subset,
@@ -140,8 +141,20 @@ class HotelBooking(models.Model):
             + [
                 ("is_bookable", "=", True),
                 ("product_tmpl_id.is_room_type", "=", False),
+                ("product_tmpl_id.is_day_long_tour", "=", False),
             ]
         )
+        day_tours = Product.search(
+            common
+            + [
+                ("is_bookable", "=", True),
+                ("product_tmpl_id.is_day_long_tour", "=", True),
+            ]
+        )
+        available_day_tours = self._filter_day_tours_with_capacity(day_tours)
+        current_day_tours = self.booking_line_ids.filtered(
+            lambda line: is_day_long_tour_product(line.product_id)
+        ).mapped("product_id")
         others = Product.search(
             common
             + [
@@ -163,7 +176,124 @@ class HotelBooking(models.Model):
                 rooms = Product
         rooms = rooms | current_rooms
 
-        return (rooms | services | others).ids
+        return (
+            rooms | services | available_day_tours | current_day_tours | others
+        ).ids
+
+    def _filter_day_tours_with_capacity(self, products):
+        """Day-long tours stay selectable while daily capacity remains."""
+        self.ensure_one()
+        if not products:
+            return products
+        if not self.hotel_id:
+            return products
+
+        available = self.env["product.product"]
+        current_tour_lines = self.booking_line_ids.filtered(
+            lambda line: is_day_long_tour_product(line.product_id)
+        )
+        for product in products:
+            template = product.product_tmpl_id
+            tour_dates = set()
+            product_lines = current_tour_lines.filtered(
+                lambda line: line.product_id == product
+            )
+            if product_lines:
+                for line in product_lines:
+                    tour_date = day_tour_line_calendar_date(line)
+                    if tour_date:
+                        tour_dates.add(tour_date)
+            elif self.check_in:
+                tour_dates.add(
+                    fields.Datetime.context_timestamp(self, self.check_in).date()
+                )
+            else:
+                available |= product
+                continue
+
+            for tour_date in tour_dates:
+                remaining = template.get_day_tour_remaining_occupancy(
+                    tour_date,
+                    self.hotel_id.id,
+                    exclude_booking_id=self.id,
+                )
+                if remaining > 0:
+                    available |= product
+                    break
+        return available
+
+    def _booking_line_overlaps_stay(self, line, check_in, check_out):
+        line_check_in = line.check_in or line.booking_id.check_in
+        line_check_out = line.check_out or line.booking_id.check_out
+        if not line_check_in or not line_check_out:
+            return False
+        return line_check_out > check_in and line_check_in <= check_out
+
+    def check_selected_rooms_availability(self, check_in, check_out):
+        """Rooms are exclusive per stay; day-long tours use daily capacity."""
+        self.ensure_one()
+
+        if check_in and check_out and check_out <= check_in:
+            return {
+                "available": False,
+                "message": _("Checkout date must be after check-in date."),
+            }
+
+        room_lines = self.booking_line_ids.filtered(
+            lambda line: line.product_id and line.product_id.is_room_type
+        )
+        tour_lines = self.booking_line_ids.filtered(
+            lambda line: is_day_long_tour_product(line.product_id)
+        )
+
+        if not room_lines and not tour_lines:
+            return {
+                "available": False,
+                "message": _("No rooms or tours selected to check availability."),
+            }
+
+        BookingLine = self.env["hotel.booking.line"]
+        for line in room_lines:
+            line_check_in = line.check_in or check_in
+            line_check_out = line.check_out or check_out
+            if not line_check_in or not line_check_out:
+                continue
+            conflicts = BookingLine.search(
+                [
+                    ("id", "not in", self.booking_line_ids.ids),
+                    ("product_id", "=", line.product_id.id),
+                    ("booking_id", "!=", self.id),
+                    ("booking_id.status_bar", "in", ["confirm", "allot"]),
+                ]
+            ).filtered(
+                lambda conflict_line: self._booking_line_overlaps_stay(
+                    conflict_line, line_check_in, line_check_out
+                )
+            )
+            if conflicts:
+                return {
+                    "available": False,
+                    "message": _(
+                        "Room '%(room)s' is not available for the selected dates."
+                    )
+                    % {"room": line.product_id.display_name},
+                }
+
+        if tour_lines:
+            if not self.hotel_id:
+                return {
+                    "available": False,
+                    "message": _(
+                        "Please set a hotel on the booking before confirming "
+                        "day-long tours."
+                    ),
+                }
+            try:
+                tour_lines._validate_day_tour_occupancy()
+            except ValidationError as error:
+                return {"available": False, "message": error.args[0]}
+
+        return {"available": True, "message": ""}
 
     folio_product_ids = fields.Many2many(
         comodel_name="product.product",
