@@ -1,23 +1,94 @@
+.custom-grid.o_hotel_availability_calendar_summary_hidden {
+    display: none !important;
+}
+
 .o_calendar_container.wk_hotel_container {
+    &.o_hotel_availability_calendar_full {
+        grid-template-columns: 1fr;
+        height: 100%;
+        min-height: 0;
+
+        .o_calendar_header {
+            grid-area: 1 / 1 / 2 / 2;
+        }
+
+        .o_sidebar_toggler,
+        .o_calendar_sidebar_container,
+        .roomCustomUI {
+            display: none !important;
+        }
+
+        .o_calendar_wrapper {
+            grid-area: 3 / 1 / 4 / 2;
+            flex: 1 1 auto;
+            min-height: 0;
+            width: 100%;
+
+            .o_calendar_renderer,
+            .o_actionswiper,
+            .o_actionswiper_overflow_container,
+            .o_actionswiper_target_container,
+            .o_calendar_widget,
+            .fc {
+                flex: 1 1 auto;
+                width: 100%;
+                height: 100%;
+                min-height: 0;
+            }
+        }
+
+        .fc-dayGridMonth-view {
+            .fc-daygrid-day-frame {
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                min-height: 5rem;
+                overflow: visible;
+            }
+
+            .fc-daygrid-day-events {
+                position: relative !important;
+                flex: 1 1 auto;
+                min-height: 1.5em;
+            }
+        }
+    }
+
     .o_hotel_day_availability {
         font-size: 0.68rem;
         line-height: 1.15;
         margin-top: 0.15rem;
-        pointer-events: none;
+        pointer-events: auto;
 
-        div {
+        &__line,
+        &__more {
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        .fa {
-            width: 0.85rem;
-            text-align: center;
+        &__category {
+            font-weight: 600;
+            font-size: 0.62rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            opacity: 0.85;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        &__more {
+            font-style: italic;
+            opacity: 0.85;
         }
 
         div + div {
             margin-top: 0.05rem;
+        }
+
+        &__category + div {
+            margin-top: 0.1rem;
         }
     }
 
@@ -32,7 +103,8 @@
     }
 
     .o_hotel_day_availability_mount {
-        flex: 1 1 100%;
+        flex: 0 0 auto;
         width: 100%;
+        padding: 0 2px;
     }
 }

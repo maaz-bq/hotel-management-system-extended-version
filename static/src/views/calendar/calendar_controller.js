@@ -2,8 +2,10 @@
 
 import { patch } from "@web/core/utils/patch";
 import { useBus } from "@web/core/utils/hooks";
+import { onMounted, onPatched, onWillUnmount } from "@odoo/owl";
 import { CalendarController } from "@web/views/calendar/calendar_controller";
 import { CalendarModel } from "@web/views/calendar/calendar_model";
+import { CalendarRenderer } from "@web/views/calendar/calendar_renderer";
 import { CalendarCommonRenderer } from "@web/views/calendar/calendar_common/calendar_common_renderer";
 import { CalendarCommonPopover } from "@web/views/calendar/calendar_common/calendar_common_popover";
 
@@ -28,31 +30,68 @@ function getDashboardDateKey(date, scale) {
 	return DateTime.fromJSDate(date, options).toISODate();
 }
 
-function formatDashboardAvailabilityHtml(availability) {
+function escapeDashboardHtml(value) {
+	return String(value ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
+
+const DASHBOARD_AVAILABILITY_MAX_LINES = 3;
+
+function buildDashboardAvailabilityLines(availability) {
+	const categories = availability?.categories ?? [];
+	const lines = [];
+	for (const category of categories) {
+		const products = category.products ?? [];
+		if (products.length) {
+			const categoryName = category.name || "";
+			lines.push({
+				text: categoryName,
+				html: `<div class="o_hotel_day_availability__category">${escapeDashboardHtml(categoryName)}</div>`,
+			});
+			for (const product of products) {
+				const display = product.display || product.name || "";
+				const escaped = escapeDashboardHtml(display);
+				lines.push({
+					text: display,
+					html: `<div class="o_hotel_day_availability__line">${escaped}</div>`,
+				});
+			}
+			continue;
+		}
+		if (category.display) {
+			const display = category.display;
+			const escaped = escapeDashboardHtml(display);
+			lines.push({
+				text: display,
+				html: `<div class="o_hotel_day_availability__line">${escaped}</div>`,
+			});
+		}
+	}
+	return lines;
+}
+
+function formatDashboardAvailabilityHtml(availability, options = {}) {
 	if (!availability) {
 		return "";
 	}
-	const categories = availability.categories ?? [];
-	if (!categories.length) {
+	const maxLines = options.maxLines ?? DASHBOARD_AVAILABILITY_MAX_LINES;
+	const lines = buildDashboardAvailabilityLines(availability);
+	if (!lines.length) {
 		return "";
 	}
-	const iconForType = (metricType) => {
-		if (metricType === "room") {
-			return "fa-bed";
-		}
-		if (metricType === "tour") {
-			return "fa-sun-o";
-		}
-		return "fa-tag";
-	};
-	const lines = categories
-		.map((category) => {
-			const icon = iconForType(category.metric_type);
-			const title = category.name || "";
-			return `<div title="${title}"><i class="fa ${icon}"></i> ${category.display}</div>`;
-		})
-		.join("");
-	return `<div class="o_hotel_day_availability text-muted">${lines}</div>`;
+	const fullTitle = escapeDashboardHtml(lines.map((line) => line.text).join("\n"));
+	const visibleLines = lines.slice(0, maxLines);
+	const hiddenCount = lines.length - visibleLines.length;
+	const parts = visibleLines.map((line) => line.html);
+	if (hiddenCount > 0) {
+		parts.push(
+			`<div class="o_hotel_day_availability__more">+${hiddenCount} more</div>`,
+		);
+	}
+	return `<div class="o_hotel_day_availability text-muted" title="${fullTitle}">${parts.join("")}</div>`;
 }
 
 function isDashboardFolioLineEvent(model, recordOrId) {
@@ -237,14 +276,12 @@ patch(CalendarCommonRenderer.prototype, {
 		if (!html) {
 			return;
 		}
-		const mountPoint =
-			cellEl.querySelector(".fc-daygrid-day-top") ||
-			cellEl.querySelector(".fc-daygrid-day-frame") ||
-			cellEl;
+		const frame = cellEl.querySelector(".fc-daygrid-day-frame") || cellEl;
+		const dayEvents = frame.querySelector(".fc-daygrid-day-events");
 		const wrapper = document.createElement("div");
 		wrapper.className = "o_hotel_day_availability_mount";
 		wrapper.innerHTML = html;
-		mountPoint.appendChild(wrapper);
+		frame.insertBefore(wrapper, dayEvents || null);
 	},
 
 	_refreshDashboardDayCellAvailability() {
@@ -318,7 +355,17 @@ patch(CalendarCommonRenderer.prototype, {
 
 patch(CalendarController.prototype, {
 	isExtendedDashboard() {
-		return isHotelExtendedCalendar(this.model);
+		return Boolean(
+			this.props.context?.hotel_extended_calendar ||
+				isHotelExtendedCalendar(this.model)
+		);
+	},
+
+	get showSideBar() {
+		if (this.isExtendedDashboard()) {
+			return false;
+		}
+		return super.showSideBar;
 	},
 
 	async editRecord(record, context = {}, shouldFetchFormViewId = true) {
@@ -331,7 +378,6 @@ patch(CalendarController.prototype, {
 		const action = await super.editRecord(record, context, shouldFetchFormViewId);
 		if (isHotelExtendedCalendar(this.model)) {
 			await this.model.load();
-			await this._refreshDashboardPanelAfterLoad();
 		}
 		return action;
 	},
@@ -570,70 +616,11 @@ patch(CalendarController.prototype, {
 		};
 	},
 
-	async _refreshDashboardPanelAfterLoad() {
-		if (!isHotelExtendedCalendar(this.model)) {
-			return;
-		}
-		if (!this.selected_room) {
-			return;
-		}
-		await this.update_bookingCount(this.model.date.c, this.model.scale);
-		const shouldReloadPanel =
-			this.selected_room_is_day_long_tour ||
-			!$("#roomInformation .selected_room_container").length;
-		if (!shouldReloadPanel) {
-			return;
-		}
-		const d = await this.orm.call(
-			"product.template",
-			"fetch_data_for_room",
-			[[this.selected_room]],
-			{ selected_date: this.model.date.c },
-		);
-		this.model.room_book_ids = d.b_ids;
-		const roomDetail = d.room_record;
-		const isDayTour = Boolean(d.is_day_long_tour ?? roomDetail[0]?.is_day_long_tour);
-		this.selected_room_is_day_long_tour = isDayTour;
-		this.model.room_is_day_long_tour = isDayTour;
-		const counts = this._countsFromRoomDetail(roomDetail, isDayTour);
-		this._renderDashboardRoomPanel(this.selected_room, roomDetail, counts, isDayTour);
-	},
-
 	async update_bookingCount(calendar_data, scale) {
-		if (!isHotelExtendedCalendar(this.model)) {
-			return super.update_bookingCount(...arguments);
-		}
-		const booking_count = await this.orm.call(
-			"hotel.booking",
-			"fetch_booking_count_for_dashboard",
-			[,],
-			{
-				calendar_data: calendar_data,
-				scale: scale,
-				dayInMonth: this.model.date.daysInMonth,
-				weekDay: this.model.date.weekday,
-				room: this.model.room_id,
-				context: getHotelDashboardRpcContext(this.model),
-			},
-		);
-
-		this.model.meta.productData.check_in_booking = booking_count.check_in_booking;
-		this.model.meta.productData.check_out_booking = booking_count.check_out_booking;
-		this.model.meta.productData.booked_room_ids = booking_count.booked_room_ids;
-
-		$("#current_date_check_in").text(booking_count.current_month_check_in);
-		$("#current_date_check_out").text(booking_count.current_month_check_out);
-		this._updateCategoryAvailabilitySummary(booking_count);
-		await this._refreshCalendarGridAvailability();
-
-		this.update_available_rooms_data(booking_count);
-	},
-
-	get rendererProps() {
 		if (isHotelExtendedCalendar(this.model)) {
-			void this._refreshDashboardPanelAfterLoad();
+			return;
 		}
-		return super.rendererProps;
+		return super.update_bookingCount(...arguments);
 	},
 
 	update_available_rooms_data(booking_count) {
@@ -676,45 +663,73 @@ patch(CalendarController.prototype, {
 	},
 
 	async fetchRoomTypeData(ev = null) {
-		if (!isHotelExtendedCalendar(this.model)) {
-			return super.fetchRoomTypeData(...arguments);
+		if (isHotelExtendedCalendar(this.model)) {
+			return;
 		}
-		var room_id;
-		if (ev) {
-			room_id = $(ev.target).data("id");
-		} else {
-			room_id = this._getDefaultDashboardProductId();
-		}
+		return super.fetchRoomTypeData(...arguments);
+	},
+});
 
-		if (!room_id) {
-			this.selected_room_is_day_long_tour = false;
-			this.model.room_is_day_long_tour = false;
-			return super.fetchRoomTypeData(...arguments);
-		}
+function isAvailabilityCalendarLayout(model, actionContext) {
+	if (model.resModel !== "hotel.booking") {
+		return false;
+	}
+	if (actionContext?.hotel_extended_calendar) {
+		return true;
+	}
+	if (model.meta?.context?.hotel_extended_calendar) {
+		return true;
+	}
+	return isHotelExtendedCalendar(model);
+}
 
-		const roomEntry = this._getRoomDataEntry(room_id);
-		this.selected_room_is_day_long_tour = Boolean(roomEntry?.is_day_long_tour);
-
-		this.model.room_id = room_id;
-		this.selected_room = room_id;
-
-		const d = await this.orm.call(
-			"product.template",
-			"fetch_data_for_room",
-			[[room_id]],
-			{ selected_date: this.model.date.c },
+function applyAvailabilityCalendarLayoutClass(model, actionContext) {
+	if (model.resModel !== "hotel.booking") {
+		return;
+	}
+	const calendarContainer = document.querySelector(".o_calendar_container");
+	if (!calendarContainer) {
+		return;
+	}
+	const isFullLayout = isAvailabilityCalendarLayout(model, actionContext);
+	calendarContainer.classList.add("wk_hotel_container");
+	calendarContainer.classList.toggle(
+		"o_hotel_availability_calendar_full",
+		isFullLayout,
+	);
+	const summaryGrid = calendarContainer.previousElementSibling;
+	if (summaryGrid?.classList.contains("custom-grid")) {
+		summaryGrid.classList.toggle(
+			"o_hotel_availability_calendar_summary_hidden",
+			isFullLayout,
 		);
-		this.model.room_book_ids = d.b_ids;
-		const room_detail = d.room_record;
-		const isDayTour = Boolean(d.is_day_long_tour ?? room_detail[0]?.is_day_long_tour);
-		this.selected_room_is_day_long_tour = isDayTour;
-		this.model.room_is_day_long_tour = isDayTour;
+	}
+}
 
-		const counts = this._countsFromRoomDetail(room_detail, isDayTour);
-		this._renderDashboardRoomPanel(room_id, room_detail, counts, isDayTour);
-
-		await this.model.load();
-		await this._refreshDashboardPanelAfterLoad();
+patch(CalendarRenderer.prototype, {
+	setup() {
+		onMounted(() => {
+			const model = this.props.model;
+			applyAvailabilityCalendarLayoutClass(model, model.meta?.context);
+			this._availabilityLayoutHandler = () => {
+				applyAvailabilityCalendarLayoutClass(model, model.meta?.context);
+			};
+			model.bus.addEventListener("update", this._availabilityLayoutHandler);
+		});
+		onWillUnmount(() => {
+			const model = this.props.model;
+			if (this._availabilityLayoutHandler) {
+				model.bus.removeEventListener("update", this._availabilityLayoutHandler);
+				this._availabilityLayoutHandler = null;
+			}
+		});
+		onPatched(() => {
+			applyAvailabilityCalendarLayoutClass(
+				this.props.model,
+				this.props.model.meta?.context,
+			);
+		});
+		super.setup(...arguments);
 	},
 });
 

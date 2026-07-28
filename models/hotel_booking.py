@@ -509,13 +509,13 @@ class HotelBooking(models.Model):
 
     @api.model
     def _serialize_category_availability(
-        self, category, metric_type, available, total
+        self, category, metric_type, available, total, products=None
     ):
         if metric_type == "tour":
             display = f"{available}/{total}"
         else:
             display = str(available)
-        return {
+        payload = {
             "id": category.id,
             "name": category.name,
             "metric_type": metric_type,
@@ -523,6 +523,149 @@ class HotelBooking(models.Model):
             "total": total,
             "display": display,
         }
+        if products is not None:
+            payload["products"] = products
+        return payload
+
+    @api.model
+    def _serialize_product_availability(
+        self, template, metric_type, available, booked, total, is_past=False
+    ):
+        name = template.name
+        if metric_type == "room":
+            if is_past:
+                available = 0
+                booked = total
+            display = f"{name} {available} avail, {booked} booked"
+        elif metric_type == "tour":
+            status = "Full" if is_past or available <= 0 else "Available"
+            display = f"{name}: {status}"
+        else:
+            display = f"{name}: Available"
+        return {
+            "id": template.id,
+            "name": name,
+            "metric_type": metric_type,
+            "available": available,
+            "booked": booked,
+            "total": total,
+            "display": display,
+        }
+
+    @api.model
+    def _get_room_template_variant_domain(self, template, allowed_company_ids=None):
+        if template.is_room_type:
+            variant_domain = [
+                ("is_room_type", "=", True),
+                ("active", "=", True),
+                ("product_tmpl_id", "=", template.id),
+            ]
+        else:
+            variant_domain = [
+                ("categ_id.is_bookable", "=", True),
+                ("active", "=", True),
+                ("product_tmpl_id", "=", template.id),
+            ]
+        if allowed_company_ids:
+            variant_domain.append(
+                ("company_id", "in", allowed_company_ids + [False])
+            )
+        return variant_domain
+
+    @api.model
+    def _get_products_availability_for_day(
+        self,
+        category,
+        selected_date,
+        allowed_company_ids=None,
+        confirmed_lines=None,
+    ):
+        metric_type = self._get_category_metric_type(category, allowed_company_ids)
+        selected_day = self._dashboard_selected_day(selected_date)
+        is_past = selected_day < fields.Date.today()
+        templates = self.env["product.template"].search(
+            self._category_template_domain(category, allowed_company_ids),
+            order="name",
+        )
+        products = []
+
+        if metric_type == "room":
+            selected_datetime = datetime.combine(selected_day, dt.time.min)
+            for template in templates.filtered("is_room_type"):
+                variant_domain = self._get_room_template_variant_domain(
+                    template, allowed_company_ids
+                )
+                total = len(self.env["product.product"].search(variant_domain))
+                if is_past:
+                    products.append(
+                        self._serialize_product_availability(
+                            template, "room", 0, total, total, is_past=True
+                        )
+                    )
+                    continue
+                booked_rooms, available_rooms = self.get_booked_and_available_rooms(
+                    selected_datetime, template.id
+                )
+                available = len(available_rooms)
+                booked = len(booked_rooms)
+                products.append(
+                    self._serialize_product_availability(
+                        template,
+                        "room",
+                        available,
+                        booked,
+                        available + booked,
+                    )
+                )
+            return products
+
+        if metric_type == "tour":
+            for template in templates.filtered("is_day_long_tour"):
+                if is_past:
+                    products.append(
+                        self._serialize_product_availability(
+                            template, "tour", 0, 1, 1, is_past=True
+                        )
+                    )
+                    continue
+                occupancy = template.get_day_tour_dashboard_occupancy(selected_day)
+                remaining = occupancy.get("day_tour_remaining_occupancy", 0)
+                slot_available = 1 if remaining > 0 else 0
+                products.append(
+                    self._serialize_product_availability(
+                        template,
+                        "tour",
+                        slot_available,
+                        1 - slot_available,
+                        1,
+                    )
+                )
+            return products
+
+        for template in templates.filtered(
+            lambda tmpl: not tmpl.is_room_type and not tmpl.is_day_long_tour
+        ):
+            products.append(
+                self._serialize_product_availability(template, "service", 1, 0, 1)
+            )
+        return products
+
+    @api.model
+    def _attach_products_to_category_availability(
+        self,
+        payload,
+        category,
+        selected_date,
+        allowed_company_ids=None,
+        confirmed_lines=None,
+    ):
+        payload["products"] = self._get_products_availability_for_day(
+            category,
+            selected_date,
+            allowed_company_ids=allowed_company_ids,
+            confirmed_lines=confirmed_lines,
+        )
+        return payload
 
     @api.model
     def _get_dashboard_confirmed_lines(self, allowed_company_ids=None):
@@ -576,8 +719,15 @@ class HotelBooking(models.Model):
                     )
                 ).mapped("product_id")
                 available = max(total - len(booked_variants), 0)
-            return self._serialize_category_availability(
+            payload = self._serialize_category_availability(
                 category, metric_type, available, total
+            )
+            return self._attach_products_to_category_availability(
+                payload,
+                category,
+                selected_date,
+                allowed_company_ids=allowed_company_ids,
+                confirmed_lines=confirmed_lines,
             )
 
         if metric_type == "tour":
@@ -597,8 +747,15 @@ class HotelBooking(models.Model):
                     )
                     > 0
                 )
-            return self._serialize_category_availability(
+            payload = self._serialize_category_availability(
                 category, metric_type, available, total
+            )
+            return self._attach_products_to_category_availability(
+                payload,
+                category,
+                selected_date,
+                allowed_company_ids=allowed_company_ids,
+                confirmed_lines=confirmed_lines,
             )
 
         templates = self.env["product.template"].search(
@@ -606,8 +763,15 @@ class HotelBooking(models.Model):
             + [("is_room_type", "=", False), ("is_day_long_tour", "=", False)]
         )
         total = len(templates)
-        return self._serialize_category_availability(
+        payload = self._serialize_category_availability(
             category, "service", total, total
+        )
+        return self._attach_products_to_category_availability(
+            payload,
+            category,
+            selected_date,
+            allowed_company_ids=allowed_company_ids,
+            confirmed_lines=confirmed_lines,
         )
 
     @api.model

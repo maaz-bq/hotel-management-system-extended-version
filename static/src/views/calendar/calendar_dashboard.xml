@@ -49,40 +49,31 @@
     </t>
 
     <t t-inherit="hotel_management_system.FilterBasedOnBooking" t-inherit-mode="extension">
+        <xpath expr="//div[hasclass('custom-grid')]" position="attributes">
+            <attribute name="t-if">bookingModel() and !props.context.hotel_extended_calendar</attribute>
+        </xpath>
+
         <xpath expr="//div[hasclass('available-portion')]" position="attributes">
-            <attribute name="t-if">bookingModel() and !isExtendedDashboard()</attribute>
+            <attribute name="t-if">bookingModel() and !props.context.hotel_extended_calendar</attribute>
         </xpath>
         <xpath expr="//div[hasclass('booked-portion')]" position="attributes">
-            <attribute name="t-if">bookingModel() and !isExtendedDashboard()</attribute>
+            <attribute name="t-if">bookingModel() and !props.context.hotel_extended_calendar</attribute>
         </xpath>
 
-        <xpath expr="//div[hasclass('custom-grid')]" position="inside">
-            <div t-if="bookingModel() and isExtendedDashboard()" class="hotel-dashboard-availability-legend d-none d-md-flex align-items-center flex-wrap gap-3 px-2 pb-2 text-muted small w-100">
-                <span class="w-100">One line per bookable category on each day</span>
-                <t t-if="model.meta.productData.bookable_categories" t-foreach="model.meta.productData.bookable_categories" t-as="category" t-key="'legend-' + category['id']">
-                    <span>
-                        <i t-if="category.metric_type === 'room'" class="fa fa-bed"/>
-                        <i t-elif="category.metric_type === 'tour'" class="fa fa-sun-o"/>
-                        <i t-else="" class="fa fa-tag"/>
-                        <t t-esc="category.name"/>
-                        <t t-if="category.metric_type === 'room'"> = available rooms</t>
-                        <t t-elif="category.metric_type === 'tour'"> = tours with capacity</t>
-                        <t t-else=""> = active services</t>
-                    </span>
-                </t>
-            </div>
+        <xpath expr="//div[hasclass('o_calendar_header')]//div[hasclass('roomCustomUI')]" position="attributes">
+            <attribute name="t-if">bookingModel() and !props.context.hotel_extended_calendar and isMobileView()</attribute>
         </xpath>
 
-        <xpath expr="//div[hasclass('filterParents')]//div[hasclass('dropdown')]" position="attributes">
-            <attribute name="t-if">!isExtendedDashboard()</attribute>
+        <xpath expr="//div[hasclass('o_calendar_wrapper')]//div[hasclass('roomCustomUI')]" position="attributes">
+            <attribute name="t-if">bookingModel() and !props.context.hotel_extended_calendar and !isMobileView()</attribute>
         </xpath>
 
-        <xpath expr="//div[hasclass('filterParents')]//div[hasclass('allBookingRoom')]" position="attributes">
-            <attribute name="t-if">!isExtendedDashboard()</attribute>
+        <xpath expr="//div[hasclass('o_sidebar_toggler')]" position="attributes">
+            <attribute name="t-if">!props.context.hotel_extended_calendar</attribute>
         </xpath>
 
-        <xpath expr="//div[hasclass('filterParents')]" position="inside">
-            <t t-if="isExtendedDashboard()" t-call="hotel_management_system_extend.ExtendedDashboardDropdown"/>
+        <xpath expr="//div[hasclass('o_calendar_sidebar_container')]" position="attributes">
+            <attribute name="t-if">showSideBar and !props.context.hotel_extended_calendar</attribute>
         </xpath>
     </t>
 </templates>
