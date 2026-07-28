@@ -43,10 +43,24 @@ class ProductTemplate(models.Model):
             limit=1,
         )
 
-    def _assign_day_long_tour_category_vals(self, vals):
-        if not vals.get("is_day_long_tour"):
+    @api.model
+    def _get_night_stay_category(self):
+        """Return the existing All / Night Stay product category, if configured."""
+        return self.env["product.category"].search(
+            [
+                ("name", "=", "Night Stay"),
+                ("parent_id.name", "=", "All"),
+            ],
+            limit=1,
+        )
+
+    def _assign_hotel_product_category_vals(self, vals):
+        if vals.get("is_day_long_tour"):
+            category = self._get_day_long_tour_category()
+        elif vals.get("is_room_type"):
+            category = self._get_night_stay_category()
+        else:
             return vals
-        category = self._get_day_long_tour_category()
         if category:
             vals = dict(vals)
             vals["categ_id"] = category.id
@@ -55,12 +69,12 @@ class ProductTemplate(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         prepared_vals_list = [
-            self._assign_day_long_tour_category_vals(vals) for vals in vals_list
+            self._assign_hotel_product_category_vals(vals) for vals in vals_list
         ]
         return super().create(prepared_vals_list)
 
     def write(self, vals):
-        vals = self._assign_day_long_tour_category_vals(vals)
+        vals = self._assign_hotel_product_category_vals(vals)
         return super().write(vals)
 
     @api.onchange("is_room_type")
@@ -68,6 +82,9 @@ class ProductTemplate(models.Model):
         if self.is_room_type:
             self.is_bookable = True
             self.is_day_long_tour = False
+            category = self._get_night_stay_category()
+            if category:
+                self.categ_id = category
 
     @api.onchange("is_day_long_tour")
     def _onchange_is_day_long_tour(self):
