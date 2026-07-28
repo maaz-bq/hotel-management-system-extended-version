@@ -1,0 +1,38 @@
+.o_calendar_container.wk_hotel_container {
+    .o_hotel_day_availability {
+        font-size: 0.68rem;
+        line-height: 1.15;
+        margin-top: 0.15rem;
+        pointer-events: none;
+
+        div {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .fa {
+            width: 0.85rem;
+            text-align: center;
+        }
+
+        div + div {
+            margin-top: 0.05rem;
+        }
+    }
+
+    .fc-col-header-cell .o_hotel_day_availability {
+        font-size: 0.72rem;
+        margin-top: 0.25rem;
+    }
+
+    .fc-daygrid-day-top {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+
+    .o_hotel_day_availability_mount {
+        flex: 1 1 100%;
+        width: 100%;
+    }
+}

@@ -6,13 +6,9 @@
         <field name="inherit_id" ref="hotel_management_system.inherit_product_template_form_view"/>
         <field name="arch" type="xml">
             <xpath expr="//field[@name='is_room_type']/.." position="after">
-                <span class="d-inline-block">
-                    <field name="is_bookable"/>
-                    <label for="is_bookable"/>
-                </span>
                 <span class="d-inline-block" invisible="is_room_type">
-                    <field name="is_day_long_tour" invisible="not is_bookable"/>
-                    <label for="is_day_long_tour" invisible="not is_bookable"/>
+                    <field name="is_day_long_tour" invisible="not categ_id.is_bookable"/>
+                    <label for="is_day_long_tour" invisible="not categ_id.is_bookable"/>
                 </span>
             </xpath>
         </field>
@@ -46,7 +42,8 @@
         <field name="arch" type="xml">
             <xpath expr="//filter[@name='group_by_hotel']" position="after">
                 <separator/>
-                <filter string="Bookable" name="is_bookable" domain="[('is_bookable', '=', True)]"/>
+                <filter string="Bookable category" name="categ_is_bookable"
+                    domain="[('categ_id.is_bookable', '=', True)]"/>
                 <filter string="Day-Long Tour" name="is_day_long_tour"
                     domain="[('is_day_long_tour', '=', True)]"/>
             </xpath>

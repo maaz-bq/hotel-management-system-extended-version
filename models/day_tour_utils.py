@@ -4,6 +4,8 @@ from datetime import datetime, time
 
 from odoo import fields, _
 
+from .category_utils import is_bookable_product
+
 # Bookings in these states consume day-tour capacity when validating saves.
 DAY_TOUR_ACTIVE_BOOKING_STATUSES = ("initial", "confirm", "allot")
 
@@ -15,7 +17,7 @@ def is_day_long_tour_product(product):
     return bool(
         product
         and product.product_tmpl_id.is_day_long_tour
-        and product.is_bookable
+        and is_bookable_product(product)
         and not product.is_room_type
     )
 

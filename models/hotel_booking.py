@@ -19,6 +19,10 @@ from .day_tour_utils import (
 class HotelBooking(models.Model):
     _inherit = "hotel.booking"
 
+    @api.model
+    def _is_hotel_extended_calendar(self):
+        return bool(self.env.context.get("hotel_extended_calendar"))
+
     def _prepare_hotel_quotation_vals(self):
         self.ensure_one()
         has_room_lines = any(
@@ -119,7 +123,7 @@ class HotelBooking(models.Model):
     def _bookable_service_product_domain(self):
         self.ensure_one()
         return [
-            ("is_bookable", "=", True),
+            ("categ_id.is_bookable", "=", True),
             ("product_tmpl_id.is_room_type", "=", False),
             ("sale_ok", "=", True),
             ("active", "=", True),
@@ -131,7 +135,7 @@ class HotelBooking(models.Model):
     def _other_product_domain(self):
         self.ensure_one()
         return [
-            ("is_bookable", "=", False),
+            ("categ_id.is_bookable", "=", False),
             ("product_tmpl_id.is_room_type", "=", False),
             ("sale_ok", "=", True),
             ("active", "=", True),
@@ -159,7 +163,7 @@ class HotelBooking(models.Model):
         services = Product.search(
             common
             + [
-                ("is_bookable", "=", True),
+                ("categ_id.is_bookable", "=", True),
                 ("product_tmpl_id.is_room_type", "=", False),
                 ("product_tmpl_id.is_day_long_tour", "=", False),
             ]
@@ -167,7 +171,7 @@ class HotelBooking(models.Model):
         day_tours = Product.search(
             common
             + [
-                ("is_bookable", "=", True),
+                ("categ_id.is_bookable", "=", True),
                 ("product_tmpl_id.is_day_long_tour", "=", True),
             ]
         )
@@ -200,7 +204,7 @@ class HotelBooking(models.Model):
         others = Product.search(
             self._folio_common_product_domain()
             + [
-                ("is_bookable", "=", False),
+                ("categ_id.is_bookable", "=", False),
                 ("product_tmpl_id.is_room_type", "=", False),
             ]
         )
@@ -418,21 +422,331 @@ class HotelBooking(models.Model):
 
     @api.model
     def _bookable_product_domain(self, allowed_company_ids=None):
-        domain = [("is_bookable", "=", True), ("active", "=", True)]
+        domain = [("categ_id.is_bookable", "=", True), ("active", "=", True)]
         if allowed_company_ids is not None:
             domain.append(("company_id", "in", allowed_company_ids + [False]))
         return domain
 
     @api.model
     def _bookable_template_domain(self, allowed_company_ids=None):
-        domain = [("is_bookable", "=", True)]
+        domain = [("categ_id.is_bookable", "=", True)]
         if allowed_company_ids is not None:
             domain.append(("company_id", "in", allowed_company_ids + [False]))
         return domain
 
     @api.model
+    def _night_stay_template_domain(self, allowed_company_ids=None):
+        domain = [
+            ("is_room_type", "=", True),
+            ("categ_id.is_bookable", "=", True),
+            ("active", "=", True),
+        ]
+        if allowed_company_ids is not None:
+            domain.append(("company_id", "in", allowed_company_ids + [False]))
+        return domain
+
+    @api.model
+    def _day_long_template_domain(self, allowed_company_ids=None):
+        domain = [
+            ("is_day_long_tour", "=", True),
+            ("categ_id.is_bookable", "=", True),
+            ("active", "=", True),
+        ]
+        if allowed_company_ids is not None:
+            domain.append(("company_id", "in", allowed_company_ids + [False]))
+        return domain
+
+    @api.model
+    def _dashboard_selected_day(self, selected_date):
+        if isinstance(selected_date, dt.date) and not isinstance(
+            selected_date, datetime
+        ):
+            return selected_date
+        if isinstance(selected_date, str):
+            return fields.Date.to_date(selected_date)
+        if hasattr(selected_date, "date"):
+            return selected_date.date()
+        return fields.Date.to_date(selected_date)
+
+    @api.model
+    def _folio_line_occupies_date(self, line, selected_start, selected_end):
+        check_in = line.check_in or line.booking_id.check_in
+        check_out = line.check_out or line.booking_id.check_out
+        if not check_in or not check_out:
+            return False
+        return check_out > selected_start and check_in <= selected_end
+
+    @api.model
+    def _category_template_domain(self, category, allowed_company_ids=None):
+        domain = [("categ_id", "=", category.id), ("active", "=", True)]
+        if allowed_company_ids is not None:
+            domain.append(("company_id", "in", allowed_company_ids + [False]))
+        return domain
+
+    @api.model
+    def _get_bookable_categories(self, allowed_company_ids=None):
+        """Bookable categories that contain at least one active product."""
+        Category = self.env["product.category"]
+        categories = Category.search([("is_bookable", "=", True)], order="complete_name")
+        if not categories:
+            return Category
+        template_domain = self._bookable_template_domain(allowed_company_ids)
+        template_domain.append(("active", "=", True))
+        used_categ_ids = set(
+            self.env["product.template"].search(template_domain).mapped("categ_id").ids
+        )
+        return categories.filtered(lambda category: category.id in used_categ_ids)
+
+    @api.model
+    def _get_category_metric_type(self, category, allowed_company_ids=None):
+        domain = self._category_template_domain(category, allowed_company_ids)
+        templates = self.env["product.template"].search(domain)
+        if templates.filtered("is_room_type"):
+            return "room"
+        if templates.filtered("is_day_long_tour"):
+            return "tour"
+        return "service"
+
+    @api.model
+    def _serialize_category_availability(
+        self, category, metric_type, available, total
+    ):
+        if metric_type == "tour":
+            display = f"{available}/{total}"
+        else:
+            display = str(available)
+        return {
+            "id": category.id,
+            "name": category.name,
+            "metric_type": metric_type,
+            "available": available,
+            "total": total,
+            "display": display,
+        }
+
+    @api.model
+    def _get_dashboard_confirmed_lines(self, allowed_company_ids=None):
+        line_domain = [
+            ("product_id.categ_id.is_bookable", "=", True),
+            ("booking_id.status_bar", "in", list(CONFIRMED_BOOKING_STATUSES)),
+        ]
+        if allowed_company_ids:
+            line_domain.append(
+                ("booking_id.company_id", "in", allowed_company_ids + [False])
+            )
+        return self.env["hotel.booking.line"].search(line_domain)
+
+    @api.model
+    def _get_category_availability_for_day(
+        self,
+        category,
+        selected_date,
+        allowed_company_ids=None,
+        confirmed_lines=None,
+    ):
+        metric_type = self._get_category_metric_type(category, allowed_company_ids)
+        selected_day = self._dashboard_selected_day(selected_date)
+        is_past = selected_day < fields.Date.today()
+
+        if metric_type == "room":
+            variant_domain = [
+                ("categ_id", "=", category.id),
+                ("is_room_type", "=", True),
+                ("active", "=", True),
+            ]
+            if allowed_company_ids:
+                variant_domain.append(
+                    ("company_id", "in", allowed_company_ids + [False])
+                )
+            all_variants = self.env["product.product"].search(variant_domain)
+            total = len(all_variants)
+            if is_past:
+                available = 0
+            else:
+                if confirmed_lines is None:
+                    confirmed_lines = self._get_dashboard_confirmed_lines(
+                        allowed_company_ids
+                    )
+                selected_start = datetime.combine(selected_day, dt.time.min)
+                selected_end = datetime.combine(selected_day, dt.time.max)
+                booked_variants = confirmed_lines.filtered(
+                    lambda line, cat=category, ss=selected_start, se=selected_end: (
+                        line.product_id.categ_id == cat
+                        and self._folio_line_occupies_date(line, ss, se)
+                    )
+                ).mapped("product_id")
+                available = max(total - len(booked_variants), 0)
+            return self._serialize_category_availability(
+                category, metric_type, available, total
+            )
+
+        if metric_type == "tour":
+            templates = self.env["product.template"].search(
+                self._category_template_domain(category, allowed_company_ids)
+                + [("is_day_long_tour", "=", True)]
+            )
+            total = len(templates)
+            if is_past:
+                available = 0
+            else:
+                available = sum(
+                    1
+                    for template in templates
+                    if template.get_day_tour_dashboard_occupancy(selected_day).get(
+                        "day_tour_remaining_occupancy", 0
+                    )
+                    > 0
+                )
+            return self._serialize_category_availability(
+                category, metric_type, available, total
+            )
+
+        templates = self.env["product.template"].search(
+            self._category_template_domain(category, allowed_company_ids)
+            + [("is_room_type", "=", False), ("is_day_long_tour", "=", False)]
+        )
+        total = len(templates)
+        return self._serialize_category_availability(
+            category, "service", total, total
+        )
+
+    @api.model
+    def _get_categories_availability_for_day(
+        self, selected_date, allowed_company_ids=None, confirmed_lines=None
+    ):
+        categories = self._get_bookable_categories(allowed_company_ids)
+        return [
+            self._get_category_availability_for_day(
+                category,
+                selected_date,
+                allowed_company_ids=allowed_company_ids,
+                confirmed_lines=confirmed_lines,
+            )
+            for category in categories
+        ]
+
+    @api.model
+    def _build_bookable_categories_dashboard_data(self, allowed_company_ids=None):
+        ProductTemplate = self.env["product.template"].sudo()
+        bookable_categories = []
+        night_stay_data = []
+        day_long_data = []
+        room_data = []
+        read_fields = [
+            "name",
+            "product_variant_count",
+            "is_room_type",
+            "is_day_long_tour",
+            "day_tour_max_occupancy",
+        ]
+
+        for category in self._get_bookable_categories(allowed_company_ids):
+            metric_type = self._get_category_metric_type(category, allowed_company_ids)
+            templates = ProductTemplate.search(
+                self._category_template_domain(category, allowed_company_ids)
+            )
+            products = templates.read(read_fields)
+            for item in products:
+                item["is_day_long_tour"] = bool(item.get("is_day_long_tour"))
+            bookable_categories.append(
+                {
+                    "id": category.id,
+                    "name": category.name,
+                    "complete_name": category.complete_name,
+                    "metric_type": metric_type,
+                    "products": products,
+                }
+            )
+            room_data.extend(products)
+            if metric_type == "room":
+                night_stay_data.extend(products)
+            elif metric_type == "tour":
+                day_long_data.extend(products)
+
+        return bookable_categories, room_data, night_stay_data, day_long_data
+
+    @api.model
+    def get_night_stay_category_availability(self, selected_date):
+        """Legacy aggregate for room-type bookable categories."""
+        allowed_company_ids = self.env.context.get("allowed_company_ids", [])
+        totals = {"total": 0, "booked": 0, "available": 0}
+        confirmed_lines = self._get_dashboard_confirmed_lines(allowed_company_ids)
+        selected_day = self._dashboard_selected_day(selected_date)
+        selected_start = datetime.combine(selected_day, dt.time.min)
+        selected_end = datetime.combine(selected_day, dt.time.max)
+        for category in self._get_bookable_categories(allowed_company_ids):
+            if self._get_category_metric_type(category, allowed_company_ids) != "room":
+                continue
+            payload = self._get_category_availability_for_day(
+                category,
+                selected_date,
+                allowed_company_ids=allowed_company_ids,
+                confirmed_lines=confirmed_lines,
+            )
+            totals["total"] += payload["total"]
+            totals["available"] += payload["available"]
+        totals["booked"] = max(totals["total"] - totals["available"], 0)
+        return totals
+
+    @api.model
+    def get_day_long_category_availability(self, selected_date):
+        """Legacy aggregate for day-long bookable categories."""
+        allowed_company_ids = self.env.context.get("allowed_company_ids", [])
+        total_tours = 0
+        available_tours = 0
+        for category in self._get_bookable_categories(allowed_company_ids):
+            if self._get_category_metric_type(category, allowed_company_ids) != "tour":
+                continue
+            payload = self._get_category_availability_for_day(
+                category, selected_date, allowed_company_ids=allowed_company_ids
+            )
+            total_tours += payload["total"]
+            available_tours += payload["available"]
+        return {
+            "total_tours": total_tours,
+            "available_tours": available_tours,
+            "fully_booked_tours": total_tours - available_tours,
+        }
+
+    @api.model
+    def fetch_category_availability_range(self, start_date, end_date):
+        """Per-day availability for each bookable product category."""
+        if not self._is_hotel_extended_calendar():
+            return {}
+        start = self._dashboard_selected_day(start_date)
+        end = self._dashboard_selected_day(end_date)
+        if end > start:
+            end = end - timedelta(days=1)
+        if (end - start).days > 62:
+            end = start + timedelta(days=62)
+
+        allowed_company_ids = self.env.context.get("allowed_company_ids", [])
+        categories = self._get_bookable_categories(allowed_company_ids)
+        confirmed_lines = self._get_dashboard_confirmed_lines(allowed_company_ids)
+
+        result = {}
+        current = start
+        while current <= end:
+            day_key = fields.Date.to_string(current)
+            result[day_key] = {
+                "categories": [
+                    self._get_category_availability_for_day(
+                        category,
+                        current,
+                        allowed_company_ids=allowed_company_ids,
+                        confirmed_lines=confirmed_lines,
+                    )
+                    for category in categories
+                ]
+            }
+            current += timedelta(days=1)
+        return result
+
+    @api.model
     def fetch_data_for_dashboard(self, **kwargs):
-        """Front Desk Dashboard: list only is_bookable products."""
+        """Availability Calendar: Night Stay / Day-Long product panel data."""
+        if not self._is_hotel_extended_calendar():
+            return super().fetch_data_for_dashboard(**kwargs)
         fetch_data = {}
         product = self.env["product.product"]
         booking = self.env["hotel.booking"]
@@ -481,19 +795,19 @@ class HotelBooking(models.Model):
             }
         )
 
-        room_data = (
-            self.env["product.template"]
-            .sudo()
-            .search(self._bookable_template_domain(allowed_company_ids))
-            .read(
-                [
-                    "name",
-                    "product_variant_count",
-                    "is_day_long_tour",
-                    "day_tour_max_occupancy",
-                ]
-            )
+        (
+            bookable_categories,
+            room_data,
+            night_stay_data,
+            day_long_data,
+        ) = self._build_bookable_categories_dashboard_data(allowed_company_ids)
+
+        today = fields.Date.today()
+        category_availability = self._get_categories_availability_for_day(
+            today, allowed_company_ids
         )
+        night_stay_availability = self.get_night_stay_category_availability(today)
+        day_long_availability = self.get_day_long_category_availability(today)
 
         current_date_check_in = self.search(
             [
@@ -522,7 +836,14 @@ class HotelBooking(models.Model):
 
         fetch_data.update(
             {
+                "extended_calendar": True,
                 "room_data": room_data,
+                "night_stay_data": night_stay_data,
+                "day_long_data": day_long_data,
+                "bookable_categories": bookable_categories,
+                "category_availability": category_availability,
+                "night_stay_availability": night_stay_availability,
+                "day_long_availability": day_long_availability,
                 "check_in_booking": current_date_check_in.ids,
                 "check_out_booking": current_date_check_out.ids,
                 "current_date_check_in": len(current_date_check_in),
@@ -823,7 +1144,7 @@ class HotelBooking(models.Model):
             ]
         else:
             variant_domain = [
-                ("is_bookable", "=", True),
+                ("categ_id.is_bookable", "=", True),
                 ("active", "=", True),
                 ("product_tmpl_id", "=", room),
             ]
@@ -858,9 +1179,23 @@ class HotelBooking(models.Model):
         return booked_rooms, available_rooms
 
     def get_count_of_booking(self, selected_date_data, today_date, room):
-        """Add room counts or day-tour occupancy for the Front Desk Dashboard."""
+        """Add room counts or day-tour occupancy for the Availability Calendar."""
+        if not self._is_hotel_extended_calendar():
+            return super().get_count_of_booking(
+                selected_date_data, today_date, room
+            )
         result = super().get_count_of_booking(
             selected_date_data, today_date, room
+        )
+        allowed_company_ids = self.env.context.get("allowed_company_ids", [])
+        result["category_availability"] = self._get_categories_availability_for_day(
+            selected_date_data, allowed_company_ids
+        )
+        result["night_stay_availability"] = self.get_night_stay_category_availability(
+            selected_date_data
+        )
+        result["day_long_availability"] = self.get_day_long_category_availability(
+            selected_date_data
         )
         if not room:
             return result
@@ -889,7 +1224,7 @@ class HotelBooking(models.Model):
         if template.is_room_type:
             domain.insert(0, ("is_room_type", "=", True))
         else:
-            domain.insert(0, ("is_bookable", "=", True))
+            domain.insert(0, ("categ_id.is_bookable", "=", True))
         total_count = self.env["product.product"].search_count(domain)
         available_count = result.get("available_rooms", 0)
         result.update(
@@ -900,9 +1235,8 @@ class HotelBooking(models.Model):
         )
         return result
 
-    @api.model
     def fetch_booking_count_for_dashboard(self, **kwarg):
-        """Dashboard RPC entry point (model method, no record ids required)."""
+        """Dashboard RPC entry point."""
         return super().fetch_booking_count_for_dashboard(**kwarg)
 
     @api.depends("check_out", "check_in", "expected_check_out")
@@ -925,7 +1259,7 @@ class HotelBooking(models.Model):
                 and (
                     line.product_id.is_room_type
                     or (
-                        line.product_id.is_bookable
+                        line.product_id.categ_id.is_bookable
                         and not is_day_long_tour_product(line.product_id)
                     )
                 )
@@ -1042,7 +1376,9 @@ class HotelBooking(models.Model):
 
     @api.model
     def fetch_dashboard_calendar_line_events(self, booking_ids, product_tmpl_id=None):
-        """Return one calendar event per folio line for the Front Desk Dashboard."""
+        """Return one calendar event per folio line for the Availability Calendar."""
+        if not self._is_hotel_extended_calendar():
+            return []
         bookings = self.browse(booking_ids).exists()
         events = []
         for booking in bookings:

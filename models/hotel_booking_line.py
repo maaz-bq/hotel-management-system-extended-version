@@ -3,6 +3,10 @@
 from odoo import api, fields, models, _
 from odoo.exceptions import ValidationError
 
+from .category_utils import (
+    is_bookable_service_product,
+    is_other_product,
+)
 from .day_tour_utils import (
     day_tour_default_check_in_out,
     day_tour_end_of_calendar_day,
@@ -25,18 +29,6 @@ from .guest_member_utils import (
 )
 
 _GUEST_COUNT_FIELDS = ("adult_count", "child_count", "infant_count")
-
-
-def _is_bookable_service_product(product):
-    return bool(product and product.is_bookable and not product.is_room_type)
-
-
-def _is_other_product(product):
-    return bool(
-        product
-        and not product.is_bookable
-        and not product.is_room_type
-    )
 
 
 class HotelBookingLine(models.Model):
@@ -89,7 +81,7 @@ class HotelBookingLine(models.Model):
         related="product_id.is_room_type",
     )
     product_is_bookable = fields.Boolean(
-        related="product_id.is_bookable",
+        related="product_id.categ_id.is_bookable",
     )
     is_other_item_line = fields.Boolean(
         string="Other Item Line",
@@ -375,7 +367,7 @@ class HotelBookingLine(models.Model):
         """Non-tour bookable services follow the booking stay window."""
         for line in self.filtered(
             lambda booking_line: booking_line.product_id
-            and _is_bookable_service_product(booking_line.product_id)
+            and is_bookable_service_product(booking_line.product_id)
             and not is_day_long_tour_product(booking_line.product_id)
         ):
             booking = line.booking_id
@@ -428,10 +420,14 @@ class HotelBookingLine(models.Model):
         self._sync_room_line_dates_from_booking()
         self._sync_bookable_service_line_dates_from_booking()
 
-    @api.depends("product_id", "product_id.is_room_type", "product_id.is_bookable")
+    @api.depends(
+        "product_id",
+        "product_id.is_room_type",
+        "product_id.categ_id.is_bookable",
+    )
     def _compute_line_product_flags(self):
         for line in self:
-            line.is_other_product_line = bool(_is_other_product(line.product_id))
+            line.is_other_product_line = bool(is_other_product(line.product_id))
 
     def _prepare_sale_order_line_vals(self):
         self.ensure_one()
@@ -453,7 +449,7 @@ class HotelBookingLine(models.Model):
         vals = dict(vals)
         if vals.get("product_id"):
             product = self.env["product.product"].browse(vals["product_id"])
-            vals["is_other_item_line"] = _is_other_product(product)
+            vals["is_other_item_line"] = is_other_product(product)
         elif "is_other_item_line" not in vals:
             if self.env.context.get("booking_line_tab") == "other_items":
                 vals["is_other_item_line"] = True
@@ -567,7 +563,7 @@ class HotelBookingLine(models.Model):
 
     def _sync_service_booking_days_from_guest_counts(self):
         for line in self:
-            if not _is_bookable_service_product(line.product_id):
+            if not is_bookable_service_product(line.product_id):
                 continue
             guest_total = (
                 (line.adult_count or 0)
@@ -607,14 +603,14 @@ class HotelBookingLine(models.Model):
                 elif "tax_ids" not in vals:
                     vals["tax_ids"] = [(5, 0, 0)]
                 booking = self.env["hotel.booking"].browse(vals.get("booking_id"))
-                if _is_other_product(product):
+                if is_other_product(product):
                     vals.pop("check_in", None)
                     vals.pop("check_out", None)
                 elif not vals.get("check_in") or not vals.get("check_out"):
                     check_in, check_out = self._default_line_check_in_out(product, booking)
                     vals.setdefault("check_in", check_in)
                     vals.setdefault("check_out", check_out)
-                if _is_bookable_service_product(product):
+                if is_bookable_service_product(product):
                     guest_total = (
                         (vals.get("adult_count") or 0)
                         + (vals.get("child_count") or 0)
@@ -625,7 +621,7 @@ class HotelBookingLine(models.Model):
                 elif product.is_room_type and not vals.get("adult_count"):
                     vals["adult_count"] = 1
                     vals.setdefault("booking_days", 1)
-                elif _is_other_product(product):
+                elif is_other_product(product):
                     vals["is_other_item_line"] = True
                     vals["booking_days"] = vals.get("booking_days") or 1
                     vals["adult_count"] = 0
@@ -662,7 +658,7 @@ class HotelBookingLine(models.Model):
     def _compute_booking_days(self):
         lines_for_super = self.filtered(
             lambda line: (
-                not _is_other_product(line.product_id)
+                not is_other_product(line.product_id)
                 and not (line.product_id and line.product_id.is_room_type)
             )
         )
@@ -675,9 +671,9 @@ class HotelBookingLine(models.Model):
             if not line.booking_days:
                 line.booking_days = 1
         for line in self:
-            if _is_other_product(line.product_id):
+            if is_other_product(line.product_id):
                 continue
-            if _is_bookable_service_product(line.product_id) and not (
+            if is_bookable_service_product(line.product_id) and not (
                 line.product_id and line.product_id.is_room_type
             ):
                 line.booking_days = max(
@@ -691,7 +687,7 @@ class HotelBookingLine(models.Model):
     def _inverse_booking_days(self):
         for line in self.filtered(
             lambda booking_line: (
-                _is_other_product(booking_line.product_id)
+                is_other_product(booking_line.product_id)
                 or (
                     booking_line.product_id
                     and booking_line.product_id.is_room_type
@@ -750,7 +746,7 @@ class HotelBookingLine(models.Model):
                 continue
 
             line.tax_ids = product.taxes_id
-            line.is_other_item_line = _is_other_product(product)
+            line.is_other_item_line = is_other_product(product)
 
             if product.is_room_type:
                 if not line.adult_count:
@@ -773,7 +769,7 @@ class HotelBookingLine(models.Model):
                             ),
                         }
                     }
-            elif _is_bookable_service_product(product):
+            elif is_bookable_service_product(product):
                 if not (
                     line.adult_count
                     or line.child_count
@@ -799,7 +795,7 @@ class HotelBookingLine(models.Model):
                 warning = line._day_tour_occupancy_warning()
                 if warning:
                     return {"warning": warning}
-            elif _is_other_product(product):
+            elif is_other_product(product):
                 line.adult_count = 0
                 line.child_count = 0
                 line.infant_count = 0
@@ -912,7 +908,7 @@ class HotelBookingLine(models.Model):
     def _onchange_service_guest_qty(self):
         warning_payload = False
         for line in self:
-            if not _is_bookable_service_product(line.product_id):
+            if not is_bookable_service_product(line.product_id):
                 continue
             guest_total = (
                 (line.adult_count or 0)
@@ -934,7 +930,7 @@ class HotelBookingLine(models.Model):
     @api.onchange("booking_days", "product_id")
     def _onchange_other_product_qty(self):
         for line in self:
-            if not _is_other_product(line.product_id):
+            if not is_other_product(line.product_id):
                 continue
             qty = max(line.booking_days or 1, 1)
             line.booking_days = qty
@@ -946,7 +942,7 @@ class HotelBookingLine(models.Model):
     @api.onchange("product_id", "booking_days")
     def _onchange_other_product_price(self):
         for line in self:
-            if not _is_other_product(line.product_id) or not line.booking_id.pricelist_id:
+            if not is_other_product(line.product_id) or not line.booking_id.pricelist_id:
                 continue
             line.price = line.booking_id.pricelist_id._get_product_price(
                 line.product_id, line.booking_days or 1
@@ -980,7 +976,7 @@ class HotelBookingLine(models.Model):
     )
     def _compute_amount(self):
         for line in self:
-            if _is_other_product(line.product_id) and line.booking_id.pricelist_id:
+            if is_other_product(line.product_id) and line.booking_id.pricelist_id:
                 line.price = line.booking_id.pricelist_id._get_product_price(
                     line.product_id, line.booking_days or 1
                 )
@@ -1004,7 +1000,7 @@ class HotelBookingLine(models.Model):
         if vals.get("product_id"):
             product = self.env["product.product"].browse(vals["product_id"])
             if product:
-                vals["is_other_item_line"] = _is_other_product(product)
+                vals["is_other_item_line"] = is_other_product(product)
         tour_lines = self.browse()
         lines_for_super = self
         date_fields = ("check_in", "check_out")
@@ -1044,7 +1040,7 @@ class HotelBookingLine(models.Model):
                 if non_room_lines:
                     non_room_vals = dict(vals)
                     if non_room_lines.filtered(
-                        lambda line: _is_other_product(line.product_id)
+                        lambda line: is_other_product(line.product_id)
                     ):
                         for field in date_fields:
                             non_room_vals.pop(field, None)
@@ -1076,7 +1072,7 @@ class HotelBookingLine(models.Model):
             self._sync_service_booking_days_from_guest_counts()
 
         if "product_id" in vals:
-            other_lines = self.filtered(lambda line: _is_other_product(line.product_id))
+            other_lines = self.filtered(lambda line: is_other_product(line.product_id))
             if other_lines:
                 super(HotelBookingLine, other_lines).write(
                     {
@@ -1090,7 +1086,7 @@ class HotelBookingLine(models.Model):
 
         if "booking_days" in vals:
             for line in self.filtered(
-                lambda booking_line: _is_other_product(booking_line.product_id)
+                lambda booking_line: is_other_product(booking_line.product_id)
                 and booking_line.sale_order_line_id
             ):
                 line.sale_order_line_id.with_context(

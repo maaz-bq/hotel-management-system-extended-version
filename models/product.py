@@ -16,11 +16,6 @@ from .day_tour_utils import (
 class ProductTemplate(models.Model):
     _inherit = "product.template"
 
-    is_bookable = fields.Boolean(
-        string="Is Bookable",
-        help="Products that can be reserved through hotel booking flows "
-        "(rooms, day tours, and other bookable services).",
-    )
     is_day_long_tour = fields.Boolean(
         string="Is Day-Long Tour",
         help="When enabled, each guest on a folio line reduces this tour's "
@@ -80,7 +75,6 @@ class ProductTemplate(models.Model):
     @api.onchange("is_room_type")
     def _onchange_is_room_type(self):
         if self.is_room_type:
-            self.is_bookable = True
             self.is_day_long_tour = False
             category = self._get_night_stay_category()
             if category:
@@ -89,7 +83,6 @@ class ProductTemplate(models.Model):
     @api.onchange("is_day_long_tour")
     def _onchange_is_day_long_tour(self):
         if self.is_day_long_tour:
-            self.is_bookable = True
             self.is_room_type = False
             category = self._get_day_long_tour_category()
             if category:
@@ -97,8 +90,8 @@ class ProductTemplate(models.Model):
 
     @api.constrains(
         "is_day_long_tour",
-        "is_bookable",
         "is_room_type",
+        "categ_id",
         "day_tour_max_occupancy",
     )
     def _check_day_long_tour_config(self):
@@ -109,9 +102,9 @@ class ProductTemplate(models.Model):
                 raise ValidationError(
                     _("Day-long tours cannot be marked as room types.")
                 )
-            if not template.is_bookable:
+            if not template.categ_id.is_bookable:
                 raise ValidationError(
-                    _("Day-long tours must be bookable products.")
+                    _("Day-long tours must belong to a bookable product category.")
                 )
             if not template.day_tour_max_occupancy or template.day_tour_max_occupancy < 1:
                 raise ValidationError(
@@ -271,7 +264,7 @@ class ProductTemplate(models.Model):
             ]
         else:
             variant_domain = [
-                ("is_bookable", "=", True),
+                ("categ_id.is_bookable", "=", True),
                 ("active", "=", True),
                 ("product_tmpl_id", "=", self.id),
             ]
@@ -291,10 +284,6 @@ class ProductTemplate(models.Model):
 class ProductProduct(models.Model):
     _inherit = "product.product"
 
-    is_bookable = fields.Boolean(
-        related="product_tmpl_id.is_bookable",
-        store=True,
-    )
     is_day_long_tour = fields.Boolean(
         related="product_tmpl_id.is_day_long_tour",
     )

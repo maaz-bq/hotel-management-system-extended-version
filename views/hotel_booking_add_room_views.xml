@@ -44,9 +44,9 @@
                             <field name="booking_days" string="Qty" force_save="1"
                                 readonly="not product_id or (product_is_bookable and not product_is_room_type)" />
                             <field name="adult_count" string="Adults"
-                                invisible="not product_id or (not product_id.is_room_type and not product_id.is_bookable)" />
+                                invisible="not product_id or (not product_is_room_type and not product_is_bookable)" />
                             <field name="child_count" string="Children"
-                                invisible="not product_id or (not product_id.is_room_type and not product_id.is_bookable)" />
+                                invisible="not product_id or (not product_is_room_type and not product_is_bookable)" />
                             <field name="price" string="Unit Price" widget="monetary"
                                 options="{'currency_field':'currency_id'}" />
                             <field name="line_tax_amount" string="Tax" widget="monetary"

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="hotel_management_system_extend.DashboardProductDropdownItems" owl="1">
+        <li>
+            <a t-attf-class="dropdown-item" t-att-data-id="0" t-on-click="fetchRoomTypeData">ALL</a>
+        </li>
+        <li><hr class="dropdown-divider"/></li>
+        <t t-if="model.meta.productData.bookable_categories" t-foreach="model.meta.productData.bookable_categories" t-as="category" t-key="'cat-' + category['id']">
+            <t t-if="category.products and category.products.length">
+                <li class="dropdown-header text-muted"><t t-esc="category.name"/></li>
+                <t t-foreach="category.products" t-as="room" t-key="'cat-' + category['id'] + '-' + room['id']">
+                    <li>
+                        <a t-attf-class="dropdown-item" t-att-data-id="room.id" t-on-click="fetchRoomTypeData">
+                            <t t-esc="room.name"/>
+                        </a>
+                    </li>
+                </t>
+                <li><hr class="dropdown-divider"/></li>
+            </t>
+        </t>
+    </t>
+
+    <t t-name="hotel_management_system_extend.DashboardProductFilters" owl="1">
+        <t t-if="model.meta.productData.bookable_categories" t-foreach="model.meta.productData.bookable_categories" t-as="category" t-key="'catf-' + category['id']">
+            <t t-if="category.products" t-foreach="category.products" t-as="room" t-key="'catfp-' + category['id'] + '-' + room['id']">
+                <div class="roomRowFilter">
+                    <span>
+                        <t t-set="room" t-value="room"/>
+                        <t t-call="hotel_management_system.FilterBasedOnBooking.filter"/>
+                    </span>
+                </div>
+            </t>
+        </t>
+    </t>
+
+    <t t-name="hotel_management_system_extend.ExtendedDashboardDropdown" owl="1">
+        <div class="dropdown">
+            <button class="btn btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                Products
+                (<t t-esc="model.meta.productData.bookable_categories.length"/> categories)
+            </button>
+            <ul class="dropdown-menu dropdown-menu-primary">
+                <t t-call="hotel_management_system_extend.DashboardProductDropdownItems"/>
+            </ul>
+        </div>
+        <div class="allBookingRoom d-none">
+            <t t-call="hotel_management_system_extend.DashboardProductFilters"/>
+        </div>
+    </t>
+
+    <t t-inherit="hotel_management_system.FilterBasedOnBooking" t-inherit-mode="extension">
+        <xpath expr="//div[hasclass('available-portion')]" position="attributes">
+            <attribute name="t-if">bookingModel() and !isExtendedDashboard()</attribute>
+        </xpath>
+        <xpath expr="//div[hasclass('booked-portion')]" position="attributes">
+            <attribute name="t-if">bookingModel() and !isExtendedDashboard()</attribute>
+        </xpath>
+
+        <xpath expr="//div[hasclass('custom-grid')]" position="inside">
+            <div t-if="bookingModel() and isExtendedDashboard()" class="hotel-dashboard-availability-legend d-none d-md-flex align-items-center flex-wrap gap-3 px-2 pb-2 text-muted small w-100">
+                <span class="w-100">One line per bookable category on each day</span>
+                <t t-if="model.meta.productData.bookable_categories" t-foreach="model.meta.productData.bookable_categories" t-as="category" t-key="'legend-' + category['id']">
+                    <span>
+                        <i t-if="category.metric_type === 'room'" class="fa fa-bed"/>
+                        <i t-elif="category.metric_type === 'tour'" class="fa fa-sun-o"/>
+                        <i t-else="" class="fa fa-tag"/>
+                        <t t-esc="category.name"/>
+                        <t t-if="category.metric_type === 'room'"> = available rooms</t>
+                        <t t-elif="category.metric_type === 'tour'"> = tours with capacity</t>
+                        <t t-else=""> = active services</t>
+                    </span>
+                </t>
+            </div>
+        </xpath>
+
+        <xpath expr="//div[hasclass('filterParents')]//div[hasclass('dropdown')]" position="attributes">
+            <attribute name="t-if">!isExtendedDashboard()</attribute>
+        </xpath>
+
+        <xpath expr="//div[hasclass('filterParents')]//div[hasclass('allBookingRoom')]" position="attributes">
+            <attribute name="t-if">!isExtendedDashboard()</attribute>
+        </xpath>
+
+        <xpath expr="//div[hasclass('filterParents')]" position="inside">
+            <t t-if="isExtendedDashboard()" t-call="hotel_management_system_extend.ExtendedDashboardDropdown"/>
+        </xpath>
+    </t>
+</templates>

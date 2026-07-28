@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="action_hotel_availability_calendar" model="ir.actions.act_window">
+        <field name="name">Availability Calendar</field>
+        <field name="res_model">hotel.booking</field>
+        <field name="view_mode">calendar</field>
+        <field name="context">{'hotel_extended_calendar': True}</field>
+    </record>
+
+    <menuitem id="menu_hotel_availability_calendar"
+        name="Availability Calendar"
+        parent="hotel_management_system.menu_hotel_dashboard_root"
+        action="action_hotel_availability_calendar"
+        sequence="4"
+        groups="hotel_management_system.hotel_owner_group,hotel_management_system.hotel_reception_group"/>
+
+    <record id="hotel_management_system.action_hotel_dashboard" model="ir.actions.act_window">
+        <field name="context">{'hotel_extended_calendar': False}</field>
+    </record>
+</odoo>
