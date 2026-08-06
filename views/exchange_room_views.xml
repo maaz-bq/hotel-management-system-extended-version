@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="exchange_room_form_physical_room" model="ir.ui.view">
+        <field name="name">exchange.room.form.physical.room</field>
+        <field name="model">exchange.room</field>
+        <field name="inherit_id" ref="hotel_management_system.view_exchange_rooms"/>
+        <field name="arch" type="xml">
+            <field name="exchange_room" position="attributes">
+                <attribute name="invisible">1</attribute>
+            </field>
+            <field name="exchange_room" position="after">
+                <field name="available_physical_room_ids" invisible="1"/>
+                <field name="exchange_physical_room" string="Exchange with"
+                    options="{'no_create': True}"/>
+            </field>
+        </field>
+    </record>
+</odoo>

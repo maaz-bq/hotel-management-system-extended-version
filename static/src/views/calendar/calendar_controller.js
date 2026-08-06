@@ -249,6 +249,7 @@ patch(CalendarCommonRenderer.prototype, {
 		}
 		return {
 			...opts,
+			fixedWeekCount: false,
 			dayCellDidMount: (arg) => this.onDashboardDayCellDidMount(arg),
 			dayCellWillUnmount: (arg) => this.onDashboardDayCellWillUnmount(arg),
 			datesSet: (arg) => this.onDashboardDatesSet(arg),

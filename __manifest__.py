@@ -2,12 +2,16 @@
 {
     "name": "Hotel Management System Extend",
     "summary": "Extends hotel sale orders with portal/report fields, payment totals, and payment email fixes.",
-    "version": "18.0.1.0.69",
+    "version": "18.0.1.0.83",
     "category": "Generic Modules/Hotel Reservation",
     "depends": [
         "hotel_management_system",
     ],
     "data": [
+        "security/ir.model.access.csv",
+        "views/hotel_room_views.xml",
+        "views/allot_room_wizard_views.xml",
+        "views/exchange_room_views.xml",
         "report/sale_order_report_templates.xml",
         "report/tax_totals_templates.xml",
         "views/sale_portal_templates.xml",

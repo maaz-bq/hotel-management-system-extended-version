@@ -13,7 +13,6 @@
             </xpath>
             <xpath expr="//page[field[@name='booking_line_ids']]" position="replace">
                 <page string="Folio">
-                    <field name="folio_product_ids" invisible="1" />
                     <field name="folio_line_ids" readonly="status_bar != 'initial'"
                         nolabel="1" mode="list"
                         context="{'default_is_other_item_line': False}">
@@ -21,10 +20,14 @@
                             <field name="allowed_product_ids" column_invisible="True" />
                             <field name="is_other_item_line" column_invisible="True" />
                             <field name="status_bar" column_invisible="True" />
-                            <field name="product_id" string="Product Variant"
+                            <field name="room_type_id" column_invisible="True" force_save="1" />
+                            <field name="product_id" string="Room / Service"
                                 domain="[('id', 'in', allowed_product_ids)]"
                                 widget="sol_product_many2one"
                                 required="1" />
+                            <field name="assigned_room_id" string="Assigned Room"
+                                readonly="1" optional="show"
+                                invisible="not assigned_room_id" />
                             <field name="product_is_room_type" column_invisible="True" />
                             <field name="product_is_bookable" column_invisible="True" />
                             <field name="product_is_day_long_tour" column_invisible="True" />

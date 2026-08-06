@@ -14,10 +14,41 @@ from .day_tour_utils import (
     stay_spans_multiple_days,
     stay_is_strict_subset,
 )
-
+from .room_inventory_utils import (
+    find_conflicting_room_assignments,
+    line_room_type,
+)
 
 class HotelBooking(models.Model):
     _inherit = "hotel.booking"
+
+    other_item_product_ids = fields.Many2many(
+        comodel_name="product.product",
+        compute="_compute_other_item_product_ids",
+        string="Other Item Product Selection",
+    )
+    folio_product_ids = fields.Many2many(
+        comodel_name="product.product",
+        compute="_compute_folio_product_ids",
+        string="Folio Product Selection",
+    )
+    folio_room_type_ids = fields.Many2many(
+        comodel_name="product.template",
+        compute="_compute_folio_room_type_ids",
+        string="Folio Room Type Selection",
+    )
+    folio_line_ids = fields.One2many(
+        comodel_name="hotel.booking.line",
+        inverse_name="booking_id",
+        string="Folio Lines",
+        domain=[("is_other_item_line", "=", False)],
+    )
+    other_item_line_ids = fields.One2many(
+        comodel_name="hotel.booking.line",
+        inverse_name="booking_id",
+        string="Other Items",
+        domain=[("is_other_item_line", "=", True)],
+    )
 
     @api.model
     def _is_hotel_extended_calendar(self):
@@ -154,8 +185,24 @@ class HotelBooking(models.Model):
             ("company_id", "=", self.company_id.id),
         ]
 
+    def _get_folio_room_type_picker_products(self):
+        """One picker variant per available room type for the unified folio column."""
+        self.ensure_one()
+        Template = self.env["product.template"]
+        products = self.env["product.product"]
+        for template in Template.browse(self._get_folio_room_type_ids()):
+            picker = template._get_picker_placeholder_variant()
+            if not picker:
+                picker = template.get_billing_variant()
+            if picker:
+                products |= picker
+        current_room_products = self.folio_line_ids.filtered(
+            lambda line: line_room_type(line).is_room_type and line.product_id
+        ).mapped("product_id")
+        return products | current_room_products
+
     def _get_folio_available_product_ids(self):
-        """Products selectable inline on the Folio tab."""
+        """Products selectable inline on the Folio tab (rooms + tours/services)."""
         self.ensure_one()
         Product = self.env["product.product"]
         common = self._folio_common_product_domain()
@@ -179,23 +226,35 @@ class HotelBooking(models.Model):
         current_day_tours = self.booking_line_ids.filtered(
             lambda line: is_day_long_tour_product(line.product_id)
         ).mapped("product_id")
+        room_products = self._get_folio_room_type_picker_products()
 
-        rooms = Product
-        current_rooms = self.booking_line_ids.filtered(
-            lambda line: line.product_id.is_room_type
-        ).mapped("product_id")
-        if self.check_in and self.check_out and self.hotel_id:
-            try:
-                rooms = self.get_available_room_products(
-                    self.check_in, self.check_out, self.hotel_id.id
-                )
-            except ValidationError:
-                rooms = Product
-        rooms = rooms | current_rooms
+        return (services | available_day_tours | current_day_tours | room_products).ids
 
-        return (
-            rooms | services | available_day_tours | current_day_tours
-        ).ids
+    def _get_folio_room_type_ids(self):
+        """Room types available on the folio for the booking dates."""
+        self.ensure_one()
+        Template = self.env["product.template"]
+        if not self.hotel_id:
+            return []
+        domain = [
+            ("is_room_type", "=", True),
+            ("hotel_id", "=", self.hotel_id.id),
+        ]
+        templates = Template.search(domain)
+        available = Template
+        exclude_line_ids = self.booking_line_ids.ids
+        for template in templates:
+            if self.check_in and self.check_out and self.check_out > self.check_in:
+                if not template.has_room_type_capacity(
+                    self.check_in,
+                    self.check_out,
+                    hotel_id=self.hotel_id.id,
+                    exclude_line_ids=exclude_line_ids,
+                ):
+                    continue
+            available |= template
+        current_types = self.folio_line_ids.mapped("room_type_id")
+        return (available | current_types).ids
 
     def _get_other_item_available_product_ids(self):
         """Non-bookable products selectable on the Other Items tab."""
@@ -210,12 +269,6 @@ class HotelBooking(models.Model):
         )
         current_other_products = self.other_item_line_ids.mapped("product_id")
         return (others | current_other_products).ids
-
-    other_item_product_ids = fields.Many2many(
-        comodel_name="product.product",
-        compute="_compute_other_item_product_ids",
-        string="Other Item Product Selection",
-    )
 
     @api.depends("company_id", "booking_line_ids.product_id")
     def _compute_other_item_product_ids(self):
@@ -274,7 +327,7 @@ class HotelBooking(models.Model):
         return line_check_out > check_in and line_check_in <= check_out
 
     def check_selected_rooms_availability(self, check_in, check_out):
-        """Rooms are exclusive per stay; day-long tours use daily capacity."""
+        """Type-level capacity, variant exclusivity, and tour guest pool."""
         self.ensure_one()
 
         if check_in and check_out and check_out <= check_in:
@@ -284,7 +337,7 @@ class HotelBooking(models.Model):
             }
 
         room_lines = self.booking_line_ids.filtered(
-            lambda line: line.product_id and line.product_id.is_room_type
+            lambda line: line_room_type(line).is_room_type
         )
         tour_lines = self.booking_line_ids.filtered(
             lambda line: is_day_long_tour_product(line.product_id)
@@ -296,32 +349,43 @@ class HotelBooking(models.Model):
                 "message": _("No rooms or tours selected to check availability."),
             }
 
+        exclude_line_ids = self.booking_line_ids.ids
         BookingLine = self.env["hotel.booking.line"]
+
         for line in room_lines:
             line_check_in = line.check_in or check_in
             line_check_out = line.check_out or check_out
             if not line_check_in or not line_check_out:
                 continue
-            conflicts = BookingLine.search(
-                [
-                    ("id", "not in", self.booking_line_ids.ids),
-                    ("product_id", "=", line.product_id.id),
-                    ("booking_id", "!=", self.id),
-                    ("booking_id.status_bar", "in", ["confirm", "allot"]),
-                ]
-            ).filtered(
-                lambda conflict_line: self._booking_line_overlaps_stay(
-                    conflict_line, line_check_in, line_check_out
+            template = line_room_type(line)
+            try:
+                template.assert_room_type_capacity(
+                    line_check_in,
+                    line_check_out,
+                    hotel_id=self.hotel_id.id if self.hotel_id else None,
+                    exclude_line_ids=exclude_line_ids,
                 )
-            )
-            if conflicts:
-                return {
-                    "available": False,
-                    "message": _(
-                        "Room '%(room)s' is not available for the selected dates."
-                    )
-                    % {"room": line.product_id.display_name},
-                }
+            except ValidationError as error:
+                return {"available": False, "message": error.args[0]}
+
+            if (
+                line.assigned_room_id
+                and line.booking_id.status_bar in ("confirm", "allot")
+            ):
+                conflicts = BookingLine._find_conflicting_room_assignments(
+                    line.assigned_room_id,
+                    line_check_in,
+                    line_check_out,
+                    exclude_line_ids=exclude_line_ids,
+                )
+                if conflicts:
+                    return {
+                        "available": False,
+                        "message": _(
+                            "Room '%(room)s' is not available for the selected dates."
+                        )
+                        % {"room": line.assigned_room_id.display_name},
+                    }
 
         if tour_lines:
             if not self.hotel_id:
@@ -339,23 +403,116 @@ class HotelBooking(models.Model):
 
         return {"available": True, "message": ""}
 
-    folio_product_ids = fields.Many2many(
-        comodel_name="product.product",
-        compute="_compute_folio_product_ids",
-        string="Folio Product Selection",
+    @api.model
+    def get_available_room_products(
+        self,
+        check_in,
+        check_out,
+        hotel_id,
+        room_exchange=False,
+        room_template_id=None,
+    ):
+        """Return billing variants or room types with capacity for legacy callers."""
+        if hotel_id != 0 and not hotel_id:
+            raise ValidationError(_("Please add a Hotel before adding Rooms."))
+        if not check_in or not check_out:
+            raise ValidationError(
+                _("Please select Check-In and Check-Out dates before adding Rooms.")
+            )
+        if not room_exchange and check_in.date() < fields.Date.today():
+            raise ValidationError(_("Check-In date cannot be in the past."))
+
+        Template = self.env["product.template"]
+        domain = [("is_room_type", "=", True)]
+        if hotel_id:
+            domain.append(("hotel_id", "=", hotel_id))
+        templates = Template.search(domain)
+
+        booking = self if len(self) == 1 and self._name == "hotel.booking" else self.browse()
+        exclude_line_ids = booking.booking_line_ids.ids if booking else []
+
+        Product = self.env["product.product"]
+        available_products = Product
+        for template in templates:
+            if room_template_id and template.id != room_template_id:
+                continue
+            if template.has_room_type_capacity(
+                check_in,
+                check_out,
+                hotel_id=hotel_id,
+                exclude_line_ids=exclude_line_ids,
+            ):
+                billing = template.get_billing_variant()
+                if billing:
+                    available_products |= billing
+        return available_products
+
+    def _get_room_lines_for_allot_assignment(self):
+        self.ensure_one()
+        return self.booking_line_ids.filtered(
+            lambda line: line_room_type(line).is_room_type
+        )
+
+    def _get_room_lines_needing_assignment(self):
+        self.ensure_one()
+        return self._get_room_lines_for_allot_assignment().filtered(
+            lambda line: not line.assigned_room_id
+        )
+
+    def _action_open_allot_room_wizard(self):
+        self.ensure_one()
+        return {
+            "name": _("Allot Room"),
+            "type": "ir.actions.act_window",
+            "res_model": "hotel.booking.allot.room.wizard",
+            "view_mode": "form",
+            "target": "new",
+            "context": {
+                "default_booking_id": self.id,
+            },
+        }
+
+    def _complete_allot(self):
+        self.ensure_one()
+        self.expected_check_out = self.check_out
+        template_id = self.env.ref(
+            "hotel_management_system.hotel_booking_allot_id"
+        )
+        self.write({"status_bar": "allot"})
+        if self.env["ir.config_parameter"].sudo().get_param(
+            "hotel_management_system.send_on_allot"
+        ):
+            template_id.send_mail(self.id, force_send=True)
+
+    def allot_action(self):
+        for booking in self:
+            conflict = booking.check_selected_rooms_availability(
+                booking.check_in, booking.check_out
+            )
+            if not conflict.get("available", True):
+                return self.env["wk.wizard.message"].genrated_message(
+                    "<span class='text-danger' style='font-weight:bold;'>%s</span>"
+                    % conflict["message"],
+                    name=_("Warning"),
+                )
+        self.ensure_one()
+        if not self.env.context.get("skip_allot_room_wizard"):
+            if self._get_room_lines_for_allot_assignment():
+                if not self.hotel_id.required_document_ids:
+                    return self._action_open_allot_room_wizard()
+        return super().allot_action()
+
+    @api.depends(
+        "check_in",
+        "check_out",
+        "hotel_id",
+        "booking_line_ids.room_type_id",
     )
-    folio_line_ids = fields.One2many(
-        comodel_name="hotel.booking.line",
-        inverse_name="booking_id",
-        string="Folio Lines",
-        domain=[("is_other_item_line", "=", False)],
-    )
-    other_item_line_ids = fields.One2many(
-        comodel_name="hotel.booking.line",
-        inverse_name="booking_id",
-        string="Other Items",
-        domain=[("is_other_item_line", "=", True)],
-    )
+    def _compute_folio_room_type_ids(self):
+        for booking in self:
+            booking.folio_room_type_ids = [
+                (6, 0, booking._get_folio_room_type_ids())
+            ]
 
     @api.depends(
         "check_in",
@@ -363,6 +520,7 @@ class HotelBooking(models.Model):
         "hotel_id",
         "company_id",
         "booking_line_ids.product_id",
+        "booking_line_ids.room_type_id",
     )
     def _compute_folio_product_ids(self):
         for booking in self:
@@ -692,17 +850,11 @@ class HotelBooking(models.Model):
         is_past = selected_day < fields.Date.today()
 
         if metric_type == "room":
-            variant_domain = [
-                ("categ_id", "=", category.id),
-                ("is_room_type", "=", True),
-                ("active", "=", True),
-            ]
-            if allowed_company_ids:
-                variant_domain.append(
-                    ("company_id", "in", allowed_company_ids + [False])
-                )
-            all_variants = self.env["product.product"].search(variant_domain)
-            total = len(all_variants)
+            templates = self.env["product.template"].search(
+                self._category_template_domain(category, allowed_company_ids)
+                + [("is_room_type", "=", True)]
+            )
+            total = sum(template.room_count or 0 for template in templates)
             if is_past:
                 available = 0
             else:
@@ -712,13 +864,13 @@ class HotelBooking(models.Model):
                     )
                 selected_start = datetime.combine(selected_day, dt.time.min)
                 selected_end = datetime.combine(selected_day, dt.time.max)
-                booked_variants = confirmed_lines.filtered(
-                    lambda line, cat=category, ss=selected_start, se=selected_end: (
-                        line.product_id.categ_id == cat
-                        and self._folio_line_occupies_date(line, ss, se)
+                booked_slots = 0
+                for template in templates:
+                    booked_slots += template.get_booked_slot_count_for_day(
+                        selected_day,
+                        hotel_id=template.hotel_id.id if template.hotel_id else None,
                     )
-                ).mapped("product_id")
-                available = max(total - len(booked_variants), 0)
+                available = max(total - booked_slots, 0)
             payload = self._serialize_category_availability(
                 category, metric_type, available, total
             )
@@ -1301,17 +1453,41 @@ class HotelBooking(models.Model):
         template = self.env["product.template"].browse(room)
         product = self.env["product.product"]
         if template.is_room_type:
-            variant_domain = [
-                ("is_room_type", "=", True),
-                ("active", "=", True),
-                ("product_tmpl_id", "=", room),
-            ]
-        else:
-            variant_domain = [
-                ("categ_id.is_bookable", "=", True),
-                ("active", "=", True),
-                ("product_tmpl_id", "=", room),
-            ]
+            selected_day = (
+                selected_date.date()
+                if hasattr(selected_date, "date")
+                and not isinstance(selected_date, dt.date)
+                else selected_date
+            )
+            total_count = template.room_count or 0
+            booked_count = template.get_booked_slot_count_for_day(
+                selected_day,
+                hotel_id=template.hotel_id.id if template.hotel_id else None,
+            )
+            available_count = max(total_count - booked_count, 0)
+            selected_start = datetime.combine(selected_day, dt.time.min)
+            selected_end = datetime.combine(selected_day, dt.time.max)
+            physical_rooms = template.physical_room_ids.filtered("active")
+            booked_rooms = physical_rooms.filtered(
+                lambda room: find_conflicting_room_assignments(
+                    self.env,
+                    room,
+                    selected_start,
+                    selected_end,
+                )
+            )
+            available_rooms = physical_rooms - booked_rooms
+            if not physical_rooms and available_count > 0:
+                placeholder = template.get_placeholder_variant()
+                if placeholder:
+                    available_rooms = placeholder
+            return booked_rooms, available_rooms
+
+        variant_domain = [
+            ("categ_id.is_bookable", "=", True),
+            ("active", "=", True),
+            ("product_tmpl_id", "=", room),
+        ]
         bookable_products = product.search(variant_domain)
         selected_day = (
             selected_date.date()
@@ -1386,7 +1562,23 @@ class HotelBooking(models.Model):
 
         domain = [("active", "=", True), ("product_tmpl_id", "=", room)]
         if template.is_room_type:
-            domain.insert(0, ("is_room_type", "=", True))
+            total_count = template.room_count or 0
+            if selected_date_data < today_date:
+                available_count = 0
+            else:
+                booked = template.get_booked_slot_count_for_day(
+                    selected_date_data,
+                    hotel_id=template.hotel_id.id if template.hotel_id else None,
+                )
+                available_count = max(total_count - booked, 0)
+            result.update(
+                {
+                    "total_room_count": total_count,
+                    "booked_room_count": max(total_count - available_count, 0),
+                    "available_rooms": available_count,
+                }
+            )
+            return result
         else:
             domain.insert(0, ("categ_id.is_bookable", "=", True))
         total_count = self.env["product.product"].search_count(domain)
@@ -1709,15 +1901,17 @@ class HotelBooking(models.Model):
                             )
                             line.sale_order_line_id = sale_order_line.id
 
-                        sale_order_line.with_context(bypass_for_exchange_room=True).write(
-                            {
-                                "tax_id": line.tax_ids,
-                                "product_id": line.product_id.id,
-                                "product_uom_qty": line.booking_days or self.booking_days or 1,
-                                "price_unit": line.price,
-                                "discount": line.discount,
-                            }
-                        )
+                        sync_vals = {
+                            "tax_id": line.tax_ids,
+                            "product_uom_qty": line.booking_days or self.booking_days or 1,
+                            "price_unit": line.price,
+                            "discount": line.discount,
+                        }
+                        if line._can_sync_product_id_to_sale_line(sale_order_line):
+                            sync_vals["product_id"] = line.product_id.id
+                        sale_order_line.with_context(
+                            bypass_for_exchange_room=True
+                        ).write(sync_vals)
 
                     self.order_id = sale_order
                 self.status_bar = "confirm"
